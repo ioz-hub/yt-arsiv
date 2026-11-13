@@ -4,7 +4,15 @@ import importlib.machinery
 import re
 from datetime import datetime as _datetime
 from pathlib import Path
-_cached_path = Path(__file__).with_name("ytarsiv_core_cached.pyc")
+import os as _os_yol
+import sys as _sys_yol
+# Donmus (PyInstaller exe) surumde veri/arac/cekirdek dosyalari exe'nin yaninda durur; kaynaktan calismada bu dosyanin yaninda.
+UYGULAMA_DIZINI = (Path(_sys_yol.executable).resolve().parent if getattr(_sys_yol, "frozen", False)
+                   else Path(__file__).resolve().parent)
+ARAC_DIZINI = UYGULAMA_DIZINI / "araclar"
+if ARAC_DIZINI.is_dir():      # ffmpeg.exe / fpcalc.exe buraya konabilir; yt-dlp ffmpeg'i PATH'ten bulur
+    _os_yol.environ["PATH"] = str(ARAC_DIZINI) + _os_yol.pathsep + _os_yol.environ.get("PATH", "")
+_cached_path = UYGULAMA_DIZINI / "ytarsiv_core_cached.pyc"
 _loader = importlib.machinery.SourcelessFileLoader("_ytarsiv_core_cached", str(_cached_path))
 _cached = _loader.load_module()
 globals().update({k: v for k, v in _cached.__dict__.items() if k not in {"__name__", "__loader__", "__package__"}})
@@ -191,7 +199,7 @@ LONG_VIDEO_SECONDS = 20 * 60
 LONG_VIDEO_FORMAT = "bv*[height<=1080]+ba/b[height<=1080]/bv*+ba/b"
 
 # YouTube "bot degilim" kontrolu icin: bu dosya varsa yt-dlp cerezi buradan okur (yoksa hicbir sey degismez).
-COOKIES_FILE = Path(__file__).with_name("cookies.txt")
+COOKIES_FILE = UYGULAMA_DIZINI / "cookies.txt"
 
 try:
     import yt_dlp as _yt_dlp
@@ -1594,7 +1602,7 @@ import array as _array
 import statistics as _statistics
 import subprocess as _subprocess
 
-SES_ARACI = Path(__file__).with_name("araclar") / "fpcalc.exe"
+SES_ARACI = ARAC_DIZINI / "fpcalc.exe"
 SES_IZ_SANIYE = 120               # her dosyanin ilk 120 sn'si okunur
 SES_BIRIM = 0.1238                # bir iz ogesi ~0.124 sn
 SES_KAYMA_SN = 30                 # iki kayit arasi intro/bas farki icin aranan en buyuk kayma

@@ -15,7 +15,12 @@ from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
 # Calisma dizini guvence altina al (cift tiklamada bos olabiliyor)
-SCRIPT_DIR = Path(__file__).resolve().parent
+FROZEN = getattr(sys, "frozen", False)      # PyInstaller exe: dosyalar exe'nin yaninda
+SCRIPT_DIR = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent
+if sys.stdout is None:                       # --noconsole exe: yt-dlp/print yazacak yer bulamasin
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 os.chdir(SCRIPT_DIR)
 sys.path.insert(0, str(SCRIPT_DIR))
 

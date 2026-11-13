@@ -14,3 +14,8 @@ __pycache__/
 !ytarsiv_core_cached.pyc
 CLAUDE.md
 ytarsiv_core.recovered.py
+
+# Derleme ciktilari
+build/
+dist/
+*.zip

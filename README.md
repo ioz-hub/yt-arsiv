@@ -16,13 +16,26 @@ tespit edip ayrı izler, böylece arşivinizde hiçbir şey sessizce kaybolmaz.
 > Bu depo yalnızca uygulamayı içerir. Kişisel playlist listeleri, veritabanı, çerezler ve indirilen
 > dosyalar depoya **girmez**; ilk çalıştırmada boş bir veritabanı oluşur.
 
-## Gereksinimler
+## Kurulum
 
-- Windows, **Python 3.14** (çekirdek `ytarsiv_core_cached.pyc` olarak Python 3.14 bayt kodudur; başka sürümde çalışmaz)
-- [`yt-dlp`](https://github.com/yt-dlp/yt-dlp) (PATH'te olmalı) ve `ffmpeg`
-- Ses parmak izi (Aynı Videolar'da ses analizi) için `fpcalc.exe` (Chromaprint 1.5.1) gerekir; depoda
-  `araclar\fpcalc.exe` olarak hazır gelir, ayrıca bir şey kurmanız gerekmez
-  (kaynak ve sürüm bilgisi: `araclar\KAYNAK.txt`, lisans notu: `THIRD-PARTY.md`)
+### Hazır sürüm (önerilen)
+
+[Releases](../../releases) sayfasından `YT-Arsiv-win64.zip` dosyasını indirin, yazılabilir bir klasöre çıkarın
+(Program Files dışında) ve `YT-Arsiv.exe`'yi çalıştırın. Python, yt-dlp, ffmpeg ya da fpcalc kurmanız gerekmez;
+hepsi pakette gelir. Komut satırı sürümü: `yt-arsiv-cli.exe`.
+
+- Veritabanı (`videos.db`), `downloads\` klasörü ve isteğe bağlı `cookies.txt` exe'nin yanında durur.
+- Exe imzasızdır; Windows SmartScreen uyarırsa "Ek bilgi → Yine de çalıştır" deyin. Bazı antivirüsler
+  PyInstaller paketlerine yanlış alarm verebilir.
+- Güncelleme: yeni zip'i çıkarırken `videos.db` ve `downloads\` klasörünüze dokunmayın.
+
+### Kaynaktan çalıştırma
+
+- Windows, **Python 3.14** (çekirdek `ytarsiv_core_cached.pyc` Python 3.14 bayt kodudur; başka sürümde çalışmaz)
+- `pip install yt-dlp`, ayrıca `ffmpeg` (PATH'te ya da `araclar\` içinde)
+- Ses parmak izi için `araclar\fpcalc.exe` (Chromaprint 1.5.1) depoda hazır gelir
+  (kaynak ve sürüm: `araclar\KAYNAK.txt`, lisans notu: `THIRD-PARTY.md`)
+- Exe derlemek için: `pip install pyinstaller`, sonra `python derle.py --ffmpeg C:\yol\ffmpeg.exe`
 
 ## Kullanım
 
