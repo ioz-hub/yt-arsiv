@@ -1,0 +1,7 @@
+fpcalc.exe  -  Chromaprint 1.5.1 (ses parmak izi araci)
+Kaynak : https://github.com/acoustid/chromaprint/releases/tag/v1.5.1
+Dosya  : chromaprint-fpcalc-1.5.1-windows-x86_64.zip  (1548264 bayt)
+Zip SHA256       : 36b478e16aa69f757f376645db0d436073a42c0097b6bb2677109e7835b59bbc
+fpcalc.exe SHA256: 659ea2dba1a12d7df4fe2b6f23f60fd9414ae61aca1b014ee8fa37c5e09b930b
+Surum  : fpcalc version 1.5.1 (FFmpeg Lavc58.134.100 Lavf58.76.100 SwR3.9.100)
+Indirme: 2026-11-10 (degistirilmeden dagitilir). Yalniz ytarsiv_core.py icindeki ses analizi kapisi (_fpcalc_iz) bu dosyayi calistirir.

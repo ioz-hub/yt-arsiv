@@ -1,0 +1,16 @@
+# Kullanici verisi - asla yayinlanmaz
+videos.db
+videos.db-*
+videos.db.*
+*.bak
+cookies.txt
+downloads/
+logs/
+config.json
+
+# Uretilen / yerel
+__pycache__/
+*.pyc
+!ytarsiv_core_cached.pyc
+CLAUDE.md
+ytarsiv_core.recovered.py
