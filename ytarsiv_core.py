@@ -455,6 +455,17 @@ def _basliksizlari_dogrula(meta, log=None):
 _fetch_playlist_meta_orig = _cached.fetch_playlist_meta
 
 
+def _kanal_sirasini_cevir(entries):
+    """KANAL sekmesinde YouTube en yeni videoyu basa koyar (yt-dlp playlist_index 1 = en yeni); cekirdek numarayi
+    entry["playlist_index"] (yoksa liste sirasi) ile verir.  Arsivde numaralar ESKIDEN YENIYE verilir (en yeni EN SONDA):
+    kanala yeni video gelince eskilerin numarasi/dosya adi kaymaz, yenisi sona eklenir.  Girdiler kopyalanir ve 1..N
+    yeniden numaralanir.  TEK kapi: yalniz fetch_playlist_meta bunu cagirir (oynatma listeleri etkilenmez)."""
+    ters = [dict(e) for e in reversed(list(entries)) if e]
+    for sira, e in enumerate(ters, start=1):
+        e["playlist_index"] = sira
+    return ters
+
+
 def fetch_playlist_meta(url, *a, **k):
     meta = _fetch_playlist_meta_orig(url, *a, **k)
     try:
@@ -469,6 +480,8 @@ def fetch_playlist_meta(url, *a, **k):
     if rows and isinstance(meta, dict) and meta.get("entries"):
         haric = {r[0] for r in rows}
         meta["entries"] = [e for e in meta["entries"] if (e or {}).get("id") not in haric]
+    if isinstance(meta, dict) and meta.get("entries") and kanal_mi(url):
+        meta["entries"] = _kanal_sirasini_cevir(meta["entries"])
     _basliksizlari_dogrula(meta, k.get("log"))
     if isinstance(meta, dict) and meta.get("entries") is not None:
         _SON_CANLI[url] = {"ids": {(e or {}).get("id") for e in meta["entries"] if e},

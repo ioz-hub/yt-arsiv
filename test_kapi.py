@@ -658,6 +658,50 @@ class Kapilar(unittest.TestCase):
         self.assertEqual(self.conn.execute("SELECT url FROM playlists WHERE id=?", (pid,)).fetchone()[0],
                          "https://www.youtube.com/@Kanal/videos")
         self.assertIsNotNone(c.add_playlist(self.conn, "https://www.youtube.com/@Kanal/featured", "x")[1])
+
+    def test_kanal_yeni_video_en_sonda_numara_alir_ve_eskiler_kaymaz(self):
+        c = self.core._cached
+        kanal = "https://www.youtube.com/@Kanal/videos"
+        self.assertIsNone(self.core.add_playlist(self.conn, kanal, "kanalim")[1])
+        canli = ["KANALVID004", "KANALVID003", "KANALVID002", "KANALVID001"]       # YouTube: en yeni basta
+
+        def meta(url, *a, **k):
+            return {"title": "kanal", "entries": [
+                {"id": v, "title": "T" + v, "uploader": "u", "duration": 100,
+                 "url": "https://www.youtube.com/watch?v=" + v, "playlist_index": i + 1}       # yt-dlp: en yeni = 1
+                for i, v in enumerate(canli)]}
+
+        def dl(video_url, dest_dir, playlist_index=None):
+            vid = video_url.split("v=")[1]
+            d = Path(dest_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            p = d / f"{playlist_index or 0:03d} - T{vid} [{vid}].mp4"
+            p.write_bytes(b"x" * 2_000_000)
+            return str(p)
+
+        self._ham_meta = meta
+        self.kapiyi_tak()
+        c.download_video = dl
+        pid = self.pid("kanalim")
+
+        def sira():
+            return dict(self.conn.execute("SELECT video_id, playlist_index FROM videos WHERE playlist_id=?", (pid,)).fetchall())
+
+        # oynatma listesi (kanal degil) sirasi degismez
+        duz = self.core.fetch_playlist_meta("https://www.youtube.com/playlist?list=PLxyz")["entries"]
+        self.assertEqual([e["id"] for e in duz], canli)
+        self.assertEqual([e["playlist_index"] for e in duz], [1, 2, 3, 4])
+
+        self.core.sync_two_phase(self.conn, playlist_id=pid, log=lambda m: None)
+        ilk = {"KANALVID001": 1, "KANALVID002": 2, "KANALVID003": 3, "KANALVID004": 4}
+        self.assertEqual(sira(), ilk)
+        # kanala yeni video gelir (YouTube listesinde en basa): eskilerin numarasi DEGISMEZ, yenisi en sonda (5)
+        canli.insert(0, "KANALVID005")
+        self.core.sync_two_phase(self.conn, playlist_id=pid, log=lambda m: None)
+        self.assertEqual(sira(), dict(ilk, KANALVID005=5))
+        for vid, n in sira().items():
+            fp = self.conn.execute("SELECT file_path FROM videos WHERE video_id=? AND playlist_id=?", (vid, pid)).fetchone()[0]
+            self.assertTrue(Path(fp.replace(chr(92), "/")).name.startswith(f"{n:03d} - "), (vid, fp))
     def test_kopya_satiri_dosyasiz_ya_da_kardesle_ayni_yolsa_kendi_arsiv_adini_alir_ve_donguye_girmez(self):
         import os
         kardes = self.dosya("Klix", "001 - Sarki [DDDDDDDDDD1].mp4")
@@ -1720,6 +1764,14 @@ class StatikKapilar(unittest.TestCase):
             src = (HERE / ad).read_text(encoding="utf-8")
             self.assertNotIn("/videos", src, ad)
             self.assertNotIn("re.compile", src, ad)
+
+    def test_kanal_sirasi_yalniz_fetch_kapisinda_cevrilir(self):
+        core = (HERE / "ytarsiv_core.py").read_text(encoding="utf-8")
+        self.assertEqual(core.count("_kanal_sirasini_cevir("), 2, "tanim + fetch_playlist_meta'daki TEK cagri")
+        for ad in ("YT-Arsiv-GUI.pyw", "yt-arsiv.py"):
+            src = (HERE / ad).read_text(encoding="utf-8")
+            self.assertNotIn("_kanal_sirasini_cevir", src, ad)
+            self.assertNotIn('["playlist_index"] =', src, ad)
 
     def test_bilinmeyen_taramalari_yalniz_kontrolorden_cagrilir(self):
         import re as _re
