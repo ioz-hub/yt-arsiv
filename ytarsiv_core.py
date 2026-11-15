@@ -248,12 +248,22 @@ _last_download_end = None
 
 def download_video(video_url, dest_dir, playlist_index=None):
     global _last_download_end
+    hedef = depo_sec(dest_dir)            # TEK depo kapisi: yer yoksa ek depoya yonlendirir, hepsi doluysa indirmeyi atlar
+    if hedef is None:
+        _depo_doldu(dest_dir)
+        return None
+    if Path(hedef) != Path(dest_dir):
+        _DEPO["yonlendirilen"] += 1
+        dest_dir = hedef
     if _last_download_end is not None:
         wait = _random.uniform(*DOWNLOAD_PAUSE_SECONDS) - (_time.monotonic() - _last_download_end)
         if wait > 0:
             _time.sleep(wait)
     try:
-        return _download_video_orig(video_url, dest_dir, playlist_index)
+        sonuc = _download_video_orig(video_url, dest_dir, playlist_index)
+        if not sonuc and depo_dolu_mu(dest_dir):          # indirme yer bitince yarida kaldi
+            _depo_doldu(dest_dir)
+        return sonuc
     finally:
         _last_download_end = _time.monotonic()
 
@@ -597,7 +607,7 @@ def kopya_satirlarini_sabitle(conn, log=print):
         if kendi and kendi.exists() and os.path.normcase(str(kendi)) not in {os.path.normcase(str(q)) for q in kardesler}:
             continue                          # kendi (kardesten ayri) adi var: arsivdeyse kararli, degilse 2b arsive_toparla tasir
         kaynak = kardesler[0]
-        kok = Path(arsiv_kok("removed_from_playlist"))
+        kok = Path(arsiv_kok("removed_from_playlist", kok=_depo_koku(kaynak)))      # sabit bag ayni surucuda kurulur
         hedef = kok / kaynak.name
         try:
             kok.mkdir(parents=True, exist_ok=True)
@@ -1088,20 +1098,306 @@ def yayindan_kalkanlari_yokla(conn, video_idleri=None, log=print, should_cancel=
 # yapisina baglidir (parent / REMOVED_SUBDIR, parent.parent): asagida bu iki kapi ust duzeye uyarlanir.
 import os
 
+# ---------------------------------------------------------------------------
+# DEPOLAMA TEK KAPISI: birincil depo (downloads) dolarsa yeni indirmeler EK DEPOLARA (baska surucu/klasor) yonlendirilir;
+# hicbirinde yer yoksa indirme TEMIZ durdurulur (hata yagmuru / yarim dosya / sahte "indirilemedi" olayi yok, sonraki taramada
+# yeniden denenir).  Kapilar:
+#   depo_ayarlari / depo_ayarlari_yaz   config.json'daki 'ek_depolar' + 'min_bos_mb' icin TEK okuma / TEK yazma kapisi (atomik)
+#   depo_ekle / depo_kaldir             dogrulayarak ayar degistiren kontrolorler (GUI/CLI yalniz bunlari cagirir)
+#   depo_sec                            TEK karar kapisi: bir indirme hedefi icin yeri olan depoyu secer (None = hepsi dolu)
+#   depo_durumu                         YALNIZ OKUR (GUI/CLI tablosu)
+#   _depo_koku                          bir dosyanin hangi depoda oldugu: arsiv / geri tasima AYNI depoda kalir
+# Dosyalar bulundugu depoda KALIR; sabit bag (hard link) yalniz ayni surucuda kurulabilir.
+# ---------------------------------------------------------------------------
+import json as _json_depo
+import shutil as _shutil_depo
+
+DEPO_VARSAYILAN_MIN_BOS_MB = 2048          # bir depoda bundan az yer kalirsa o depoya yeni indirme baslamaz
+_MIB = 1024 * 1024
+_DEPO = {"dolu": False, "atlanan": 0, "yonlendirilen": 0, "log": None}
+
+
+def _depo_ham_ayar():
+    try:
+        if CONFIG_FILE.exists():
+            d = _json_depo.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            return d if isinstance(d, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def depo_ayarlari():
+    """{'ek_depolar': [Path, ...], 'min_bos_mb': int}  (config.json yok / bozuksa varsayilanlar)."""
+    cfg = _depo_ham_ayar()
+    ek = []
+    for s in cfg.get("ek_depolar") or []:
+        if isinstance(s, str) and s.strip():
+            p = Path(s.strip())
+            if p not in ek:
+                ek.append(p)
+    try:
+        mb = int(cfg.get("min_bos_mb", DEPO_VARSAYILAN_MIN_BOS_MB))
+    except (TypeError, ValueError):
+        mb = DEPO_VARSAYILAN_MIN_BOS_MB
+    return {"ek_depolar": ek, "min_bos_mb": max(0, mb)}
+
+
+def depo_ayarlari_yaz(ek_depolar=None, min_bos_mb=None):
+    """config.json'a depo ayarlarini yazan TEK kapi (atomik; 'root_path' gibi diger anahtarlara dokunmaz)."""
+    cfg = _depo_ham_ayar()
+    if ek_depolar is not None:
+        cfg["ek_depolar"] = [str(p) for p in ek_depolar]
+    if min_bos_mb is not None:
+        cfg["min_bos_mb"] = int(min_bos_mb)
+    gecici = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
+    gecici.write_text(_json_depo.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(gecici, CONFIG_FILE)
+
+
+def depo_min_bos_mb():
+    return depo_ayarlari()["min_bos_mb"]
+
+
+def depo_min_bos_ayarla(mb):
+    """Kontrolor: dogrular ve yazar.  Doner: (True, mb) | (False, hata_metni)."""
+    try:
+        mb = int(str(mb).strip())
+    except ValueError:
+        return False, "sayi girin (MB)"
+    if not 0 <= mb <= 10_000_000:
+        return False, "0 ile 10.000.000 MB arasinda olmali"
+    depo_ayarlari_yaz(min_bos_mb=mb)
+    return True, mb
+
+
+def _ayni_yol(a, b):
+    return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
+
+
+def _icinde(yol, kok):
+    y, k = os.path.normcase(os.path.abspath(str(yol))), os.path.normcase(os.path.abspath(str(kok)))
+    return y == k or y.startswith(k.rstrip("\\/") + os.sep)
+
+
+def tum_depolar():
+    """[birincil, ek1, ek2, ...] (Path)."""
+    return [Path(_cached.DOWNLOADS)] + depo_ayarlari()["ek_depolar"]
+
+
+def _depo_koku(yol):
+    """Dosyanin icinde durdugu depo koku (en uzun eslesen); hicbirinde degilse birincil depo."""
+    en = None
+    for kok in tum_depolar():
+        if _icinde(yol, kok) and (en is None or len(str(kok)) > len(str(en))):
+            en = kok
+    return en if en is not None else Path(_cached.DOWNLOADS)
+
+
+def _depo_bos(yol):
+    """Yolun bulundugu surucudeki bos bayt (yol henuz yoksa var olan en yakin ustuyle)."""
+    p = Path(yol)
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    try:
+        return _shutil_depo.disk_usage(str(p)).free
+    except OSError:
+        return 0
+
+
+def depo_dolu_mu(yol):
+    return _depo_bos(yol) < depo_ayarlari()["min_bos_mb"] * _MIB
+
+
+def depo_sec(dest_dir):
+    """Indirme hedefi (birincil depo altinda bir klasor) icin yeri olan ilk depoyu secer ve AYNI goreli klasoru o depoda dondurur.
+    Birincil depoda yer varsa hedef aynen doner; ek depo takili degilse (surucu cikarilmis) atlanir; hicbirinde yer yoksa None."""
+    dest = Path(dest_dir)
+    ana = Path(_cached.DOWNLOADS)
+    try:
+        goreli = dest.relative_to(ana)
+    except ValueError:
+        return dest                                   # depo disi (elle verilmis) hedefe karisma
+    rezerv = depo_ayarlari()["min_bos_mb"] * _MIB
+    for kok in tum_depolar():
+        if not _ayni_yol(kok, ana) and not kok.is_dir():
+            continue
+        if _depo_bos(kok) >= rezerv:
+            return kok / goreli
+    return None
+
+
+def depo_ekle(yol):
+    """Ek depo ekler.  Doner: (True, Path) | (False, hata_metni).  Klasor yoksa olusturulur; yazilabilir olmali; birincil depo
+    ile ic ice olamaz; ayni depo iki kez eklenmez."""
+    try:
+        p = Path(str(yol).strip().strip('"')).expanduser()
+    except Exception as e:
+        return False, f"gecersiz yol: {e}"
+    if not str(p).strip() or not p.is_absolute():
+        return False, "tam (mutlak) bir klasor yolu verin, ornek D:/YT-Arsiv-2"
+    ana = Path(_cached.DOWNLOADS)
+    if _icinde(p, ana) or _icinde(ana, p):
+        return False, "ek depo birincil depo (downloads) ile ic ice olamaz"
+    mevcut = depo_ayarlari()["ek_depolar"]
+    for m in mevcut:
+        if _ayni_yol(m, p) or _icinde(p, m) or _icinde(m, p):
+            return False, f"bu depo zaten (ya da ic ice) ekli: {m}"
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        deneme = p / ".yt-arsiv-yazma-denemesi"
+        deneme.write_text("x", encoding="utf-8")
+        deneme.unlink()
+    except OSError as e:
+        return False, f"klasor olusturulamadi / yazilamiyor: {e}"
+    depo_ayarlari_yaz(ek_depolar=mevcut + [p])
+    return True, p
+
+
+def depo_kaldir(conn, yol):
+    """Ek depoyu AYARDAN kaldirir (dosyalara dokunmaz).  Doner: (True, bu depoda duran kayit sayisi) | (False, hata_metni).
+    Kayitlar mutlak yolla durur, dosyalar yerinde kalir; ancak depo artik taranmaz."""
+    mevcut = depo_ayarlari()["ek_depolar"]
+    hedef = next((m for m in mevcut if _ayni_yol(m, yol)), None)
+    if hedef is None:
+        return False, "bu yol ek depo olarak kayitli degil"
+    n = sum(1 for (fp,) in conn.execute("SELECT file_path FROM videos WHERE file_path IS NOT NULL")
+            if os.path.isabs(fp) and _icinde(fp, hedef))
+    depo_ayarlari_yaz(ek_depolar=[m for m in mevcut if m is not hedef])
+    return True, n
+
+
+def depo_durumu(conn=None):
+    """YALNIZ OKUR.  [{'yol','ana','var','bos','toplam','kayit'}]  (kayit: o depoda duran video kaydi; conn verilmezse None)."""
+    rows = []
+    kayitlar = None
+    if conn is not None:
+        kayitlar = [r[0] for r in conn.execute("SELECT file_path FROM videos WHERE file_path IS NOT NULL")]
+    ana = Path(_cached.DOWNLOADS)
+    ekler = depo_ayarlari()["ek_depolar"]
+    for kok in [ana] + ekler:
+        var = kok.is_dir() or _ayni_yol(kok, ana)
+        p = kok
+        while not p.exists() and p != p.parent:
+            p = p.parent
+        try:
+            du = _shutil_depo.disk_usage(str(p))
+            bos, toplam = du.free, du.total
+        except OSError:
+            bos = toplam = 0
+        if kayitlar is None:
+            n = None
+        elif _ayni_yol(kok, ana):
+            n = sum(1 for fp in kayitlar if not os.path.isabs(fp) or _icinde(fp, ana))
+        else:
+            n = sum(1 for fp in kayitlar if os.path.isabs(fp) and _icinde(fp, kok))
+        rows.append({"yol": str(kok), "ana": _ayni_yol(kok, ana), "var": var, "bos": bos, "toplam": toplam, "kayit": n})
+    return rows
+
+
+def _depo_doldu(dest_dir):
+    """Bir indirme yer olmadigi icin atlandi/yarim kaldi: sayar, ilkinde TEK uyari yazar."""
+    _DEPO["atlanan"] += 1
+    if not _DEPO["dolu"]:
+        _DEPO["dolu"] = True
+        log = _DEPO["log"]
+        if log:
+            ay = depo_ayarlari()
+            log(f"  [!] DEPO DOLU: hicbir depoda {ay['min_bos_mb']} MB bos yer yok (birincil + {len(ay['ek_depolar'])} ek depo). "
+                "Kalan indirmeler atlandi (sonraki taramada yeniden denenir); yer acin ya da Depolama'dan ek depo ekleyin.")
+
+
+def _depo_logu(log):
+    def f(msg):
+        if _DEPO["dolu"] and "HATA: indirilemedi" in str(msg):
+            return
+        log(msg)
+    return f
+
+
+class _DepoSusturma:
+    """Depo dolunca atlanan indirmeler icin 'download_failed' olayi yazilmaz (gercek bir indirme hatasi degil)."""
+
+    def __enter__(self):
+        self._orig = _cached.log_event
+        orig = self._orig
+
+        def log_event(conn, event_type, *a, **k):
+            if event_type == "download_failed" and _DEPO["dolu"]:
+                return None
+            return orig(conn, event_type, *a, **k)
+
+        _cached.log_event = log_event
+        return self
+
+    def __exit__(self, *exc):
+        _cached.log_event = self._orig
+        return False
+
+
+# Disk indeksi (yeniden baglama / "bu video diskte var mi") EK DEPOLARI da gezer: birincil depoda ayni video varsa o kazanir.
+_build_disk_index_orig = _cached._build_disk_index
+
+
+def _build_disk_index():
+    idx = _build_disk_index_orig()
+    for kok in depo_ayarlari()["ek_depolar"]:
+        if not kok.is_dir():
+            continue
+        for f in kok.rglob("*"):
+            if not f.is_file() or f.suffix.lower() not in VIDEO_EXTENSIONS or _PARCA_RE.search(f.stem):
+                continue
+            vid = _cached.extract_video_id(f.stem)
+            if vid:
+                idx.setdefault(vid, f)
+    return idx
+
+
+_cached._build_disk_index = _build_disk_index
+
+
+# Cekirdek (sync_playlists), kaydin dosyasi kendi playlist klasorunde mi diye 'abs_p.relative_to(DOWNLOADS).parts[0]' ile bakar ve
+# downloads DISINDAKI bir dosyada coker.  Ek depodaki dosyalar icin resolve_video_path, relative_to'yu EK DEPO KOKUNE gore de
+# yanitlayan bir yol nesnesi dondurur: dosya 'kendi klasorunde' sayilir, birincil depoya hicbir sey kopyalanmaz.
+class _DepoYolu(type(Path())):
+    def relative_to(self, other, *a, **k):
+        try:
+            return super().relative_to(other, *a, **k)
+        except ValueError:
+            for kok in depo_ayarlari()["ek_depolar"]:
+                if _icinde(self, kok):
+                    return super().relative_to(kok)
+            raise
+
+
+_resolve_video_path_orig = _cached.resolve_video_path
+
+
+def resolve_video_path(file_path):
+    p = _resolve_video_path_orig(file_path)
+    if p is not None and not _icinde(p, _cached.DOWNLOADS) and any(_icinde(p, k) for k in depo_ayarlari()["ek_depolar"]):
+        return _DepoYolu(p)
+    return p
+
+
+_cached.resolve_video_path = resolve_video_path
+
+
 _ARSIV_DURUM_KLASORU = {"unavailable": YAYINDAN_KALKAN_DIR, "removed_from_playlist": LISTE_DISI_DIR}
 _ARSIV_ADLARI = (LISTE_DISI_DIR, YAYINDAN_KALKAN_DIR, ESKI_LISTE_DISI_DIR)
 
 
-def arsiv_kok(durum_ya_da_klasor):
-    """Ust duzey arsiv klasoru: durum ('unavailable' | 'removed_from_playlist') ya da klasor adi verilir."""
+def arsiv_kok(durum_ya_da_klasor, kok=None):
+    """Ust duzey arsiv klasoru: durum ('unavailable' | 'removed_from_playlist') ya da klasor adi verilir.  kok verilmezse birincil depo;
+    ek depodaki dosyalar KENDI deposunun arsiv klasorune gider (surucu degistirmez)."""
     ad = _ARSIV_DURUM_KLASORU.get(durum_ya_da_klasor, durum_ya_da_klasor)
-    return _cached.DOWNLOADS / ad
+    return (Path(kok) if kok is not None else _cached.DOWNLOADS) / ad
 
 
 def _ust_arsivde(yol):
     """Dosya DOGRUDAN downloads\\<arsiv klasoru>\\ icinde mi?"""
     p = Path(yol)
-    return p.parent.parent == _cached.DOWNLOADS and p.parent.name in _ARSIV_ADLARI
+    return p.parent.name in _ARSIV_ADLARI and _ayni_yol(p.parent.parent, _depo_koku(p))
 
 
 _move_to_removed_orig = _cached.move_to_removed
@@ -1113,7 +1409,7 @@ def move_to_removed(abs_video_path):
     p = Path(abs_video_path)
     if not p.exists() or _ust_arsivde(p):
         return abs_video_path
-    return _cached._move_files_with_sidecars(p, arsiv_kok(LISTE_DISI_DIR))
+    return _cached._move_files_with_sidecars(p, arsiv_kok(LISTE_DISI_DIR, kok=_depo_koku(p)))
 
 
 def _sahip_playlist_klasoru(abs_video_path):
@@ -1130,7 +1426,7 @@ def _sahip_playlist_klasoru(abs_video_path):
                 "JOIN playlists p ON p.id=v.playlist_id WHERE v.video_id=? AND v.file_path IS NOT NULL", (vid,)):
             yol = resolve_video_path(fp)
             if yol and os.path.normcase(str(yol)) == hedef:
-                return _cached.DOWNLOADS / sanitize(alias or baslik or f"playlist_{pid}")
+                return _depo_koku(abs_video_path) / sanitize(alias or baslik or f"playlist_{pid}")
     finally:
         con.close()
     return None
@@ -1165,7 +1461,10 @@ def arsive_toparla(conn, log=print, durumlar=("unavailable", "removed_from_playl
                 "SELECT video_id, playlist_id, title, file_path FROM videos "
                 "WHERE status=? AND file_path IS NOT NULL", (durum,)).fetchall():
             src = resolve_video_path(fp)
-            if not src or not src.exists() or src.parent == hedef_klasor or _cached.INCELEME_SUBDIR in src.parts:
+            if not src or not src.exists():
+                continue
+            hedef_klasor = arsiv_kok(durum, kok=_depo_koku(src))      # dosya BULUNDUGU depoda arsivlenir
+            if src.parent == hedef_klasor or _cached.INCELEME_SUBDIR in src.parts:
                 continue
             if conn.execute("SELECT 1 FROM videos WHERE file_path=? AND NOT (video_id=? AND playlist_id=?) LIMIT 1",
                             (fp, vid, pid)).fetchone():
@@ -1590,14 +1889,22 @@ def sync_two_phase(conn, playlist_id=None, log=print, should_cancel=None, on_pha
         if pid is not None and pid not in pids:
             pids.append(pid)
     log(f"\n=== 3/3 INDIRME: {n_def} video, {len(pids)} playlist ===")
-    for pid in pids:
-        if should_cancel():
-            log("[iptal edildi]")
-            break
-        on_phase("Indiriliyor...")
-        s3 = _cached.sync_playlists(conn, playlist_id=pid, log=log, should_cancel=should_cancel)
-        summary["new"] = summary.get("new", 0) + s3.get("new", 0)
-        summary["errors"] = summary.get("errors", 0) + s3.get("errors", 0)
+    _DEPO.update(dolu=False, atlanan=0, yonlendirilen=0, log=log)
+    try:
+        with _DepoSusturma():
+            for pid in pids:
+                if should_cancel():
+                    log("[iptal edildi]")
+                    break
+                on_phase("Indiriliyor...")
+                s3 = _cached.sync_playlists(conn, playlist_id=pid, log=_depo_logu(log), should_cancel=should_cancel)
+                summary["new"] = summary.get("new", 0) + s3.get("new", 0)
+                summary["errors"] = summary.get("errors", 0) + s3.get("errors", 0)
+    finally:
+        _DEPO["log"] = None
+    summary["depo_dolu"] = _DEPO["atlanan"]                    # yer olmadigi icin atlanan/yarim kalan indirme sayisi
+    summary["depo_yonlendirilen"] = _DEPO["yonlendirilen"]     # birincil dolu oldugu icin ek depoya giden indirme sayisi
+    summary["errors"] = max(0, summary.get("errors", 0) - _DEPO["atlanan"])   # depo dolulugu "indirme hatasi" sayilmaz
     return summary
 
 # ---------------------------------------------------------------------------

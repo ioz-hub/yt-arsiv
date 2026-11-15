@@ -11,6 +11,7 @@ tespit edip ayrı izler, böylece arşivinizde hiçbir şey sessizce kaybolmaz.
 - Veritabanıyla bağı olmayan dosyaları `_Bilinmeyen` klasörüne toplar
 - "Aynı Videolar": farklı listelerdeki aynı videoları başlık, süre ve (isteğe bağlı) ses parmak iziyle bulur
 - Çok sayıda videonun listeden kaybolduğu durumda kendi başına karar vermez, size sorar
+- **Depolama:** birincil depo dolarsa yeni indirmeler ek depoya (başka sürücü/klasör) gider; hiçbir yerde yer yoksa indirme temiz durur
 - tkinter arayüzü (`YT-Arsiv-GUI.pyw`) ve komut satırı (`yt-arsiv.py`)
 
 > Bu depo yalnızca uygulamayı içerir. Kişisel playlist listeleri, veritabanı, çerezler ve indirilen
@@ -55,8 +56,23 @@ python yt-arsiv.py sync               # tara + yenileri indir + kayıpları işa
 python yt-arsiv.py status             # kayıp / sorunlu videolar
 python yt-arsiv.py silinme            # onay bekleyen toplu silinmeler (--onayla / --koru)
 python yt-arsiv.py tara --kuru        # veritabanıyla bağsız dosyaları listele
+python yt-arsiv.py depo               # depoların boş yeri ve kayıt sayısı
+python yt-arsiv.py depo --ekle D:/YT-Arsiv-2    # ek depo ekle
 python yt-arsiv.py history --limit 50
 ```
+
+## Depolama (disk dolarsa)
+
+Arayüzde **Depolama** düğmesi (komut satırında `depo`) birincil depoyu (`downloads`) ve ek depoları gösterir.
+
+- Bir depoda **en az 2048 MB** boş yer kalmalıdır (ayarlanabilir); altına düşerse yeni indirme o depoya başlamaz.
+- Birincil depo dolarsa yeni indirmeler sırayla **ek depolara** gider; kayıt dosyanın tam yolunu tutar.
+- Hiçbir depoda yer yoksa indirme **temiz durur**: tek uyarı yazılır, "indirme hatası" kaydı oluşmaz,
+  yer açılınca ya da ek depo eklenince bir sonraki tarama kaldığı yerden devam eder.
+- Dosyalar bulundukları depoda kalır; `_ListeDisi` arşivi de aynı depoda tutulur. Mevcut dosyalar taşınmaz.
+- Ek depolar `config.json` içindeki `ek_depolar` listesinde durur (arayüz/`depo` komutu yazar).
+- Sınırlar: sabit bağ (yer kazandıran birleştirme) yalnız aynı sürücüde çalışır; ek depodaki dosyaların
+  numarası indirildiği andaki sıraya göre kalır (sonradan yeniden numaralanmaz).
 
 Bot kontrolüne takılırsanız tarayıcınızdan dışa aktardığınız `cookies.txt` dosyasını uygulama
 klasörüne koyun (depoya girmez).

@@ -12,7 +12,7 @@ import threading
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 # Calisma dizini guvence altina al (cift tiklamada bos olabiliyor)
 FROZEN = getattr(sys, "frozen", False)      # PyInstaller exe: dosyalar exe'nin yaninda
@@ -100,6 +100,7 @@ class App:
         ttk.Button(toolbar, text="Sec.Playlisti Tara",     command=self.on_sync_selected).pack(side="left", padx=2)
         ttk.Button(toolbar, text="HEPSINI TARA",           command=self.on_sync_all).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Silinme onaylari",       command=self.on_silinme_onaylari).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="Depolama",               command=self.on_depolama).pack(side="left", padx=2)
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
         ttk.Button(toolbar, text="Manuel klasorleri tara", command=self.on_scan_manual).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Tum klasorleri tara", command=self.on_scan_local_files).pack(side="left", padx=2)
@@ -1803,8 +1804,11 @@ class App:
                     f"_YayındanKalkan'a tasinan: {summary.get('yayindan_kalkan_tasinan', 0)}\n"
                     f"Sabit bagla birlesen     : {summary.get('kopya_baglanan', 0)} dosya ({summary.get('kopya_kazanilan_mb', 0):.0f} MB)\n"
                     f"Farkli kopya (kayitli)   : {summary.get('kopya_farkli', 0)}\n"
+                    f"Ek depoya giden indirme : {summary.get('depo_yonlendirilen', 0)}\n"
+                    f"Depo dolu (atlanan)     : {summary.get('depo_dolu', 0)}\n"
                     f"Hata                    : {summary['errors']}\n"
                 )
+                self._son_ozet = summary
             except Exception as e:
                 self._enqueue_log(f"\n[!] Beklenmeyen hata: {e}")
             finally:
@@ -1820,6 +1824,9 @@ class App:
         self.status_var.set("Tarama bitti.")
         self._refresh_all()
         self.root.after(300, lambda: self._silinme_sor(otomatik=True))
+        ozet, self._son_ozet = getattr(self, "_son_ozet", None), None
+        if ozet and ozet.get("depo_dolu"):
+            self.root.after(600, lambda: self._depo_dolu_uyar(ozet["depo_dolu"]))
 
     # ---------------- Coklu silinme onayi ----------------
 
@@ -1899,6 +1906,106 @@ class App:
         ttk.Button(bar, text="Koru (silinmedi)", command=koru).pack(side="left", padx=2)
         ttk.Button(bar, text="Tumunu sec", command=lambda: tv.selection_set(tv.get_children())).pack(side="left", padx=12)
         ttk.Button(bar, text="Sonra sor", command=win.destroy).pack(side="right", padx=2)
+
+    # ---------------- Depolama ----------------
+
+    def _depo_dolu_uyar(self, n):
+        if messagebox.askyesno(
+                "YT-Arsiv",
+                f"Depo dolu: {n} video indirilemedi (sonraki taramada yeniden denenir).\n\n"
+                "Bos yeri gormek / ek depo eklemek icin Depolama penceresi acilsin mi?"):
+            self.on_depolama()
+
+    def on_depolama(self):
+        """Birincil + ek depolar: bos yer, kayit sayisi; ek depo ekle/kaldir; minimum bos yer.  Tum isler core.depo_* kapilarindan."""
+        eski = getattr(self, "_depo_pencere", None)
+        if eski is not None and eski.winfo_exists():
+            eski.lift()
+            return
+        win = tk.Toplevel(self.root)
+        self._depo_pencere = win
+        win.title("Depolama")
+        win.geometry("940x430")
+        win.transient(self.root)
+        ttk.Label(
+            win, justify="left", wraplength=900,
+            text=("Birincil depo (downloads) dolarsa yeni indirmeler sirayla EK DEPOLARA gider (ayri surucu ya da klasor). "
+                  "Hicbir depoda yeterli bos yer yoksa indirme temiz durur ve sonraki taramada yeniden denenir.\n"
+                  "Dosyalar bulunduklari depoda kalir (_ListeDisi arsivi de ayni depoda tutulur). Sabit bag ile yer kazandiran "
+                  "birlestirme yalniz ayni surucuda calisir."),
+        ).pack(fill="x", padx=10, pady=8)
+        cols = ("yol", "tur", "bos", "toplam", "kayit", "durum")
+        frame = ttk.Frame(win)
+        frame.pack(fill="both", expand=True, padx=10)
+        tv = ttk.Treeview(frame, columns=cols, show="headings", selectmode="browse", height=6)
+        for c, ad, w in (("yol", "Depo klasoru", 380), ("tur", "Tur", 70), ("bos", "Bos", 90), ("toplam", "Toplam", 90),
+                         ("kayit", "Video kaydi", 90), ("durum", "Durum", 120)):
+            tv.heading(c, text=ad)
+            tv.column(c, width=w, anchor="w")
+        tv.pack(fill="both", expand=True)
+        durum = tk.StringVar(value="")
+        ttk.Label(win, textvariable=durum).pack(anchor="w", padx=10, pady=2)
+
+        def doldur():
+            tv.delete(*tv.get_children())
+            for d in core.depo_durumu(self.conn):
+                tv.insert("", "end", iid=d["yol"], values=(
+                    d["yol"], "Birincil" if d["ana"] else "Ek", f"{d['bos'] / 2 ** 30:.1f} GB", f"{d['toplam'] / 2 ** 30:.1f} GB",
+                    d["kayit"], "Takili" if d["var"] else "TAKILI DEGIL"))
+
+        def ekle():
+            yol = filedialog.askdirectory(parent=win, title="Ek depo klasoru sec (ornek D:/YT-Arsiv-2)")
+            if not yol:
+                return
+            ok, sonuc = core.depo_ekle(yol)
+            if not ok:
+                messagebox.showerror("YT-Arsiv", str(sonuc), parent=win)
+                return
+            self.log(f"Ek depo eklendi: {sonuc}")
+            durum.set(f"Ek depo eklendi: {sonuc}")
+            doldur()
+
+        def kaldir():
+            sec = tv.selection()
+            if not sec:
+                messagebox.showinfo("YT-Arsiv", "Once bir ek depo sec.", parent=win)
+                return
+            yol = sec[0]
+            if any(d["ana"] and d["yol"] == yol for d in core.depo_durumu()):
+                messagebox.showinfo("YT-Arsiv", "Birincil depo kaldirilamaz.", parent=win)
+                return
+            if not messagebox.askyesno("YT-Arsiv", f"{yol}\n\nEk depo listeden kaldirilsin mi? Dosyalar SILINMEZ ama depo artik taranmaz.",
+                                       parent=win):
+                return
+            ok, sonuc = core.depo_kaldir(self.conn, yol)
+            if not ok:
+                messagebox.showerror("YT-Arsiv", str(sonuc), parent=win)
+                return
+            self.log(f"Ek depo kaldirildi: {yol} ({sonuc} video kaydi bu depoda duruyor)")
+            durum.set(f"Kaldirildi. {sonuc} video kaydi bu depoda duruyor (dosyalar yerinde).")
+            doldur()
+
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=10, pady=8)
+        ttk.Button(bar, text="Ek depo ekle...", command=ekle).pack(side="left", padx=2)
+        ttk.Button(bar, text="Secili ek depoyu kaldir", command=kaldir).pack(side="left", padx=2)
+        ttk.Button(bar, text="Yenile", command=doldur).pack(side="left", padx=2)
+        ttk.Button(bar, text="Kapat", command=win.destroy).pack(side="right", padx=2)
+        mb = tk.StringVar(value=str(core.depo_min_bos_mb()))
+        ayar = ttk.Frame(win)
+        ayar.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Label(ayar, text="Bir depoda en az bu kadar bos yer (MB) kalmali, yoksa yeni indirme o depoya baslamaz:").pack(side="left")
+        ttk.Entry(ayar, textvariable=mb, width=8).pack(side="left", padx=6)
+
+        def kaydet():
+            ok, sonuc = core.depo_min_bos_ayarla(mb.get())
+            if not ok:
+                messagebox.showerror("YT-Arsiv", str(sonuc), parent=win)
+                return
+            durum.set(f"Minimum bos yer {sonuc} MB olarak kaydedildi.")
+
+        ttk.Button(ayar, text="Kaydet", command=kaydet).pack(side="left")
+        doldur()
 
     # ---------------- Log ----------------
 

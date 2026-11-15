@@ -702,6 +702,149 @@ class Kapilar(unittest.TestCase):
         for vid, n in sira().items():
             fp = self.conn.execute("SELECT file_path FROM videos WHERE video_id=? AND playlist_id=?", (vid, pid)).fetchone()[0]
             self.assertTrue(Path(fp.replace(chr(92), "/")).name.startswith(f"{n:03d} - "), (vid, fp))
+
+    # --- DEPOLAMA KAPISI (birincil dolunca ek depo / hepsi doluysa temiz durma) ---
+    def _depo_hazirla(self, ana_mb, ek_mb):
+        core = self.core
+        self.ek = self.tmp / "ek_depo"
+        ok, p = core.depo_ekle(self.ek)
+        self.assertTrue(ok, p)
+        self.bos = {"ana": ana_mb, "ek": ek_mb}
+
+        def sahte(yol):
+            return (self.bos["ek"] if core._icinde(yol, self.ek) else self.bos["ana"]) * 1024 * 1024
+
+        core._depo_bos = sahte                # gercek diske dokunmadan bos yeri taklit eder
+
+    def _indirme_kur(self):
+        """Gercek download_video kapisi (depo_sec) calisir; yalniz en alttaki indirici sahte."""
+        self.core.DOWNLOAD_PAUSE_SECONDS = (0, 0)
+        self.indirilen = []
+
+        def ham(video_url, dest_dir, playlist_index=None):
+            vid = video_url.split("v=")[1]
+            d = Path(dest_dir)
+            d.mkdir(parents=True, exist_ok=True)
+            p = d / f"{playlist_index or 0:03d} - T [{vid}].mp4"
+            p.write_bytes(b"x" * 2_000_000)
+            self.indirilen.append(str(p))
+            return str(p)
+
+        self.core._download_video_orig = ham
+        self.core._cached.download_video = self.core.download_video
+
+    def test_depo_ayarlari_yazma_kapisi_diger_anahtarlari_korur_ve_bozuk_dosyada_varsayilan_verir(self):
+        import json
+        core = self.core
+        self.assertTrue(str(core.CONFIG_FILE).startswith(str(self.tmp)), core.CONFIG_FILE)     # gercek config'e dokunma
+        self.assertEqual(core.depo_ayarlari(), {"ek_depolar": [], "min_bos_mb": core.DEPO_VARSAYILAN_MIN_BOS_MB})
+        core.CONFIG_FILE.write_text('{"baska": 7}', encoding="utf-8")
+        core.depo_ayarlari_yaz(ek_depolar=[self.tmp / "x"], min_bos_mb=500)
+        self.assertEqual(json.loads(core.CONFIG_FILE.read_text(encoding="utf-8"))["baska"], 7)
+        self.assertEqual(core.depo_ayarlari(), {"ek_depolar": [self.tmp / "x"], "min_bos_mb": 500})
+        self.assertFalse(core.CONFIG_FILE.with_name(core.CONFIG_FILE.name + ".tmp").exists())
+        self.assertEqual(core.depo_min_bos_ayarla("abc")[0], False)
+        self.assertEqual(core.depo_min_bos_ayarla(-5)[0], False)
+        self.assertEqual(core.depo_min_bos_ayarla(" 1024 "), (True, 1024))
+        self.assertEqual(core.depo_min_bos_mb(), 1024)
+        core.CONFIG_FILE.write_text("{bozuk", encoding="utf-8")
+        self.assertEqual(core.depo_ayarlari(), {"ek_depolar": [], "min_bos_mb": core.DEPO_VARSAYILAN_MIN_BOS_MB})
+
+    def test_depo_ekle_dogrular_ve_kaldir_dosyalara_dokunmaz(self):
+        core = self.core
+        ek = self.tmp / "ek1"
+        ok, _p = core.depo_ekle(ek)
+        self.assertTrue(ok)
+        self.assertTrue(ek.is_dir())
+        self.assertFalse(core.depo_ekle(ek)[0])                          # ayni depo iki kez eklenmez
+        self.assertFalse(core.depo_ekle(core.DOWNLOADS / "ic")[0])       # birincil depo ile ic ice olamaz
+        self.assertFalse(core.depo_ekle("goreli/yol")[0])                # mutlak yol sart
+        self.assertFalse(core.depo_ekle(ek / "alt")[0])                  # ekli deponun icinde
+        (ek / "dosya.mp4").write_bytes(b"x")
+        self.assertEqual(core.depo_kaldir(self.conn, ek), (True, 0))
+        self.assertTrue((ek / "dosya.mp4").exists())                     # dosyalara dokunulmaz
+        self.assertEqual(core.depo_ayarlari()["ek_depolar"], [])
+        self.assertFalse(core.depo_kaldir(self.conn, ek)[0])
+
+    def test_depo_sec_birincil_doluysa_ek_depoya_yonlendirir_hepsi_doluysa_none(self):
+        core = self.core
+        self._depo_hazirla(ana_mb=100, ek_mb=50_000)
+        klasor = core.DOWNLOADS / "Klix"
+        self.assertEqual(core.depo_sec(klasor), self.ek / "Klix")        # birincil dolu -> ek depo
+        self.bos["ana"] = 50_000
+        self.assertEqual(core.depo_sec(klasor), klasor)                  # birincilde yer var -> hedef degismez
+        self.bos.update(ana=100, ek=100)
+        self.assertIsNone(core.depo_sec(klasor))                         # hicbirinde yer yok
+        self.bos.update(ana=100, ek=50_000)
+        shutil.rmtree(self.ek)                                           # ek surucu takili degil
+        self.assertIsNone(core.depo_sec(klasor))
+        self.assertEqual(core.depo_sec(self.tmp / "baska"), self.tmp / "baska")      # depo disi hedefe karismaz
+
+    def test_birincil_depo_dolunca_indirme_ek_depoya_gider_ve_kayit_mutlak_yol_olur(self):
+        core = self.core
+        self._depo_hazirla(ana_mb=100, ek_mb=50_000)
+        self.entries["PL1"] = [(f"DEPOVID{i:04d}", f"S{i}") for i in range(1, 4)]
+        self.kapiyi_tak()
+        self._indirme_kur()
+        s = core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=lambda m: None)
+        self.assertEqual((s["depo_yonlendirilen"], s["depo_dolu"], s["errors"]), (3, 0, 0))
+        self.assertEqual(len(self.indirilen), 3)
+        for yol in self.indirilen:
+            self.assertTrue(core._icinde(yol, self.ek), yol)
+        for (fp,) in self.conn.execute("SELECT file_path FROM videos WHERE playlist_id=?", (self.pid("Klix"),)):
+            self.assertTrue(Path(fp).is_absolute() and core._icinde(fp, self.ek) and Path(fp).exists(), fp)
+        # ikinci tarama: kayitlar ek depodaki dosyalari buluyor, yeniden indirme YOK
+        core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=lambda m: None)
+        self.assertEqual(len(self.indirilen), 3)
+        self.assertEqual([x["kayit"] for x in core.depo_durumu(self.conn)], [0, 3])
+
+    def test_hicbir_depoda_yer_yoksa_indirme_temiz_durur_hata_olayi_yazmaz_ve_sonra_yeniden_denenir(self):
+        core = self.core
+        self._depo_hazirla(ana_mb=100, ek_mb=100)
+        self.entries["PL1"] = [(f"DEPOVID{i:04d}", f"S{i}") for i in range(1, 4)]
+        self.kapiyi_tak()
+        self._indirme_kur()
+        satirlar = []
+        s = core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=satirlar.append)
+        self.assertEqual(self.indirilen, [])
+        self.assertEqual((s["depo_dolu"], s["errors"]), (3, 0))
+        self.assertEqual(sum("DEPO DOLU" in x for x in satirlar), 1)                 # TEK uyari
+        self.assertFalse(any("HATA: indirilemedi" in x for x in satirlar))
+        n = self.conn.execute("SELECT COUNT(*) FROM events WHERE event_type='download_failed'").fetchone()[0]
+        self.assertEqual(n, 0)                                                        # depo dolulugu 'indirme hatasi' degil
+        self.bos.update(ana=50_000)                                                   # yer acildi
+        s2 = core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=lambda m: None)
+        self.assertEqual(len(self.indirilen), 3)                                      # ayni tarama simdi indirir
+        self.assertEqual((s2["depo_dolu"], s2["depo_yonlendirilen"]), (0, 0))
+
+    def test_ek_depodaki_listeden_cikan_dosya_kendi_deposunun_arsivine_gider(self):
+        core = self.core
+        self._depo_hazirla(ana_mb=50_000, ek_mb=50_000)
+        d = self.ek / "Klix"
+        d.mkdir(parents=True)
+        f = d / "001 - T [EKARSIV0001].mp4"
+        f.write_bytes(b"x" * 2_000_000)
+        self.satir("EKARSIV0001", "Klix", status="removed_from_playlist", file_path=str(f))
+        core.arsive_toparla(self.conn, log=lambda m: None)
+        yeni = self.conn.execute("SELECT file_path FROM videos WHERE video_id='EKARSIV0001'").fetchone()[0]
+        self.assertEqual(Path(yeni).parent, self.ek / "_ListeDisi")
+        self.assertTrue(Path(yeni).exists())
+        self.assertFalse((core.DOWNLOADS / "_ListeDisi").exists())                    # birincil depoya TASINMAZ
+        self.assertEqual(core.arsive_toparla(self.conn, log=lambda m: None)["removed_from_playlist"], 0)   # tekrar: islem yok
+
+    def test_disk_indeksi_ek_depolari_da_gezer_ve_birincil_kazanir(self):
+        core = self.core
+        self._depo_hazirla(ana_mb=50_000, ek_mb=50_000)
+        (self.ek / "Klix").mkdir(parents=True)
+        e1 = self.ek / "Klix" / "001 - T [INDEKS00001].mp4"
+        e1.write_bytes(b"x" * 5000)
+        (self.ek / "Klix" / "002 - T [INDEKS00002].mp4").write_bytes(b"x" * 5000)
+        self.dosya("Klix", "003 - T [INDEKS00002].mp4")                               # ayni video birincilde de var
+        (self.ek / "Klix" / "004 - T [INDEKS00003].f251.webm").write_bytes(b"x" * 5000)   # parca dosya video degil
+        idx = core._cached._build_disk_index()
+        self.assertEqual(Path(idx["INDEKS00001"]), e1)
+        self.assertEqual(Path(idx["INDEKS00002"]).parent, core.DOWNLOADS / "Klix")    # birincil kazanir
+        self.assertNotIn("INDEKS00003", idx)
     def test_kopya_satiri_dosyasiz_ya_da_kardesle_ayni_yolsa_kendi_arsiv_adini_alir_ve_donguye_girmez(self):
         import os
         kardes = self.dosya("Klix", "001 - Sarki [DDDDDDDDDD1].mp4")
@@ -1772,6 +1915,20 @@ class StatikKapilar(unittest.TestCase):
             src = (HERE / ad).read_text(encoding="utf-8")
             self.assertNotIn("_kanal_sirasini_cevir", src, ad)
             self.assertNotIn('["playlist_index"] =', src, ad)
+
+    def test_depo_ayari_ve_bos_yer_kontrolu_yalniz_depo_kapisinda(self):
+        import re as _re
+        core = (HERE / "ytarsiv_core.py").read_text(encoding="utf-8")
+        self.assertEqual(core.count("disk_usage("), 3, "disk_usage yalniz: _ShutilBag, _depo_bos, depo_durumu")
+        self.assertEqual(core.count("os.replace(gecici, CONFIG_FILE)"), 1, "config.json TEK yazma kapisi")
+        self.assertEqual(core.count("def depo_sec("), 1)
+        m = _re.search(r"def download_video\(video_url, dest_dir, playlist_index=None\):.*?(?=\n\n\n)", core, _re.S)
+        self.assertIsNotNone(m)
+        self.assertIn("depo_sec(dest_dir)", m.group(0), "indirme depo kapisini atliyor")
+        for ad in ("YT-Arsiv-GUI.pyw", "yt-arsiv.py"):
+            src = (HERE / ad).read_text(encoding="utf-8")
+            for yasak in ("disk_usage", "config.json", "CONFIG_FILE", '"ek_depolar"', "'ek_depolar'", '"min_bos_mb"', "'min_bos_mb'"):
+                self.assertNotIn(yasak, src, f"{ad}: depo ayari/bos yer kontrolu kapi disinda ({yasak})")
 
     def test_bilinmeyen_taramalari_yalniz_kontrolorden_cagrilir(self):
         import re as _re

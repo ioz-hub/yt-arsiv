@@ -17,6 +17,11 @@ from ytarsiv_core import (
     add_playlist,
     kanal_mi,
     bilinmeyenleri_tasi,
+    depo_durumu,
+    depo_ekle,
+    depo_kaldir,
+    depo_min_bos_ayarla,
+    depo_min_bos_mb,
     kanal_url_duzenle,
     manuel_tarama,
     tum_klasorleri_tara,
@@ -76,6 +81,12 @@ def cmd_sync(args, conn):
     print(f"Hata                  : {summary['errors']}")
     if summary['removed'] or summary['unavailable']:
         print("\nDetay icin:  python yt-arsiv.py status")
+    if summary.get('depo_yonlendirilen'):
+        print(f"Ek depoya giden       : {summary['depo_yonlendirilen']} indirme (birincil depo dolu)")
+    if summary.get('depo_dolu'):
+        print(f"\n[!] DEPO DOLU: {summary['depo_dolu']} video indirilemedi (sonraki taramada yeniden denenir).")
+        print("    python yt-arsiv.py depo                   (bos yeri goster)")
+        print("    python yt-arsiv.py depo --ekle D:/Arsiv2  (ek depo ekle)")
     if summary.get('silinme_onay_bekleyen'):
         print(f"\n[?] {summary['silinme_onay_bekleyen']} video listede gorunmuyor ama silinmis sayilmadi (onayin bekleniyor):")
         print("    python yt-arsiv.py silinme            (listele)")
@@ -121,6 +132,24 @@ def cmd_silinme(args, conn):
         print(f"{silinmeyi_koru(conn, anahtarlar)} video korundu (silinmedi).")
     else:
         print(f"\n{len(bek)} video onay bekliyor.  --onayla (hepsini silinmis say) ya da --koru (hepsi kalsin).")
+
+
+def cmd_depo(args, conn):
+    if args.ekle:
+        ok, sonuc = depo_ekle(args.ekle)
+        print(f"Ek depo eklendi: {sonuc}" if ok else f"Eklenemedi: {sonuc}")
+    if args.kaldir:
+        ok, sonuc = depo_kaldir(conn, args.kaldir)
+        print(f"Ek depo kaldirildi ({sonuc} video kaydi orada duruyor, dosyalar yerinde)." if ok else f"Kaldirilamadi: {sonuc}")
+    if args.min_bos is not None:
+        ok, sonuc = depo_min_bos_ayarla(args.min_bos)
+        print(f"Minimum bos yer: {sonuc} MB" if ok else f"Ayarlanamadi: {sonuc}")
+    print(f"Minimum bos yer: {depo_min_bos_mb()} MB (bir depoda bundan az yer kalirsa yeni indirme o depoya baslamaz)")
+    for d in depo_durumu(conn):
+        tur = "birincil" if d["ana"] else "ek"
+        print(f"[{tur:8s}] {d['yol']}")
+        print(f"           bos {d['bos'] / 2 ** 30:.1f} GB / toplam {d['toplam'] / 2 ** 30:.1f} GB   video kaydi: {d['kayit']}"
+              + ("" if d["var"] else "   [TAKILI DEGIL]"))
 
 
 def cmd_status(args, conn):
@@ -193,6 +222,12 @@ def main():
     p.add_argument("--onayla", action="store_true", help="Hepsi listeden cikmis sayilsin")
     p.add_argument("--koru", action="store_true", help="Hicbiri silinmedi, kalsin")
     p.set_defaults(func=cmd_silinme)
+
+    p = sub.add_parser("depo", help="Depolama: bos yer + ek depolar (--ekle YOL / --kaldir YOL / --min-bos MB)")
+    p.add_argument("--ekle", help="Ek depo klasoru ekle (birincil dolunca yeni indirmeler oraya gider)")
+    p.add_argument("--kaldir", help="Ek depoyu listeden kaldir (dosyalar silinmez)")
+    p.add_argument("--min-bos", type=int, help="Bir depoda en az bu kadar bos yer (MB) kalmali")
+    p.set_defaults(func=cmd_depo)
 
     p = sub.add_parser("status", help="Kayip/sorunlu videolari listele")
     p.set_defaults(func=cmd_status)
