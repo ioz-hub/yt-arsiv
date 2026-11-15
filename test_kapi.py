@@ -845,6 +845,45 @@ class Kapilar(unittest.TestCase):
         self.assertEqual(Path(idx["INDEKS00001"]), e1)
         self.assertEqual(Path(idx["INDEKS00002"]).parent, core.DOWNLOADS / "Klix")    # birincil kazanir
         self.assertNotIn("INDEKS00003", idx)
+
+    # --- 4+ HANELI SIRA NUMARASI (kanal 1000+ video) ---
+    def test_dort_haneli_sira_numarasi_taninir_ve_her_taramada_yeniden_adlandirilmaz(self):
+        c = self.core._cached
+        self.assertEqual(c._extract_meta_from_filename("2228 - T [abcdefghijk]"), ("abcdefghijk", 2228, "T"))
+        self.assertEqual(c._extract_meta_from_filename("001 - T [abcdefghijk]"), ("abcdefghijk", 1, "T"))
+        fp = self.dosya("Klix", "2228 - T [IDXDORT0001].mp4")
+        self.satir("IDXDORT0001", "Klix", file_path=fp)
+        self.conn.execute("UPDATE videos SET playlist_index=2228 WHERE video_id='IDXDORT0001'")
+        self.conn.commit()
+
+        def meta(url, *a, **k):
+            return {"title": "k", "entries": [{"id": "IDXDORT0001", "title": "T", "uploader": "u", "duration": 100,
+                                               "url": "https://www.youtube.com/watch?v=IDXDORT0001", "playlist_index": 2228}]}
+
+        self._ham_meta = meta
+        self.kapiyi_tak()
+        for tur in range(3):                                         # her taramada AYNI ad kalmali
+            satirlar = []
+            self.core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=satirlar.append)
+            self.assertFalse(any("yeniden adlandirildi" in x for x in satirlar), (tur, satirlar))
+            self.assertEqual(sorted(p.name for p in (self.core.DOWNLOADS / "Klix").iterdir()), ["2228 - T [IDXDORT0001].mp4"])
+
+    def test_tekrarli_sira_numarasi_oneki_onarilir_yan_dosyalarla_ve_db_yolu_guncellenir(self):
+        core = self.core
+        klasor = core.DOWNLOADS / "Klix"
+        fp = self.dosya("Klix", "2228 - 2228 - 2228 - 2228 - T [IDTEKRAR001].mp4")
+        (klasor / "2228 - 2228 - 2228 - 2228 - T [IDTEKRAR001].info.json").write_bytes(b"{}")
+        temiz = self.dosya("Klix", "005 - T [IDTEMIZ0001].mp4")
+        self.satir("IDTEKRAR001", "Klix", file_path=fp)
+        self.satir("IDTEMIZ0001", "Klix", file_path=temiz)
+        self.conn.execute("UPDATE videos SET playlist_index=2228 WHERE video_id='IDTEKRAR001'")
+        self.conn.commit()
+        self.assertEqual(core.numara_tekrarlarini_onar(self.conn, log=lambda m: None), 1)
+        self.assertEqual(sorted(p.name for p in klasor.iterdir()),
+                         ["005 - T [IDTEMIZ0001].mp4", "2228 - T [IDTEKRAR001].info.json", "2228 - T [IDTEKRAR001].mp4"])
+        yeni = self.conn.execute("SELECT file_path FROM videos WHERE video_id='IDTEKRAR001'").fetchone()[0]
+        self.assertTrue(core.resolve_video_path(yeni).exists(), yeni)
+        self.assertEqual(core.numara_tekrarlarini_onar(self.conn, log=lambda m: None), 0)       # tekrar: islem yok
     def test_kopya_satiri_dosyasiz_ya_da_kardesle_ayni_yolsa_kendi_arsiv_adini_alir_ve_donguye_girmez(self):
         import os
         kardes = self.dosya("Klix", "001 - Sarki [DDDDDDDDDD1].mp4")

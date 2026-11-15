@@ -28,6 +28,57 @@ VIDEOID_PATTERNS.append(re.compile(
 # Bilerek tekrarlanan videolar: "Ayni Videolar" sonuclarindan cikarilir, dosyalara dokunulmaz.
 DUPLICATE_EXCEPTIONS = {"O0XVJxaeHiQ"}  # her Eurodance listesinin basindaki Dj Kip parcasi
 
+
+# ---------------------------------------------------------------------------
+# SIRA NUMARASI ONEKI (4+ hane): cekirdek '^\d{3}\s*-\s*' (TAM 3 hane) bekler.  Indeks 1000'i asinca ('2228 - baslik') onek TANINMAZ:
+# sync_playlists her taramada "onek yok" sanip yeniden adlandirir ve renumber_video_files eski oneki silemeyip basa yenisini ekler
+# ('2228 - 2228 - 2228 - baslik' ...).  Desen 3+ haneye genisletilir; ayni numaranin tekrarlari TEK onek sayilir.  Cekirdek dosya
+# adindan indeksi 'ad[:3]' ile okur: _extract_meta_from_filename bu yuzden sarilir.  Onceki surumun biriktirdigi tekrarlar
+# numara_tekrarlarini_onar ile her taramanin basinda temizlenir.
+# ---------------------------------------------------------------------------
+_cached.NUMBER_PREFIX_RE = re.compile(r"^(\d{3,6})(?:\s*-\s*\1)*\s*-\s*")
+NUMBER_PREFIX_RE = _cached.NUMBER_PREFIX_RE
+_TEKRAR_ONEK_RE = re.compile(r"^(\d{3,6})(?:\s*-\s*\1)+\s*-\s*")
+
+_extract_meta_from_filename_orig = _cached._extract_meta_from_filename
+
+
+def _extract_meta_from_filename(stem):
+    vid, idx, title = _extract_meta_from_filename_orig(stem)
+    m = NUMBER_PREFIX_RE.match(stem)
+    if m:
+        idx = int(m.group(1))
+    return vid, idx, title
+
+
+_cached._extract_meta_from_filename = _extract_meta_from_filename
+
+
+def numara_tekrarlarini_onar(conn, log=print):
+    """Dosya adinin basindaki TEKRARLI sira numarasini ('2228 - 2228 - 2228 - baslik') tek onege indirir (yan dosyalarla birlikte,
+    cekirdegin renumber_video_files kapisiyla) ve DB yolunu gunceller.  Tekrar calistirilabilir.  Doner: duzeltilen dosya sayisi."""
+    n = 0
+    for r in conn.execute("SELECT video_id, playlist_id, file_path, playlist_index FROM videos "
+                          "WHERE file_path IS NOT NULL").fetchall():
+        fp = r["file_path"]
+        p = resolve_video_path(fp)
+        m = _TEKRAR_ONEK_RE.match(p.stem) if p else None
+        if not m or not p.exists():
+            continue
+        idx = r["playlist_index"] or int(m.group(1))
+        try:
+            yeni = Path(_cached.renumber_video_files(p, idx))
+        except OSError as e:
+            log(f"  [!] numara tekrari onarilamadi ({p.name[:50]}...): {e}")
+            continue
+        if yeni != p:
+            conn.execute("UPDATE videos SET file_path=? WHERE file_path=?", (relativize(yeni), fp))
+            n += 1
+    conn.commit()
+    if n:
+        log(f"  [#] {n} dosyanin tekrarli sira numarasi onarildi")
+    return n
+
 _find_duplicates_orig = find_duplicates
 
 
@@ -877,7 +928,7 @@ def yarim_indirmeler(conn):
     for (klasor, vid), g in sorted(gruplar.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
         if vid in tam:
             continue                              # bitmis kopyasi var: bu yarim indirme degil, artik
-        mi = re.match(r"(\d{3})\s*-", sorted(g["adlar"])[0])
+        mi = re.match(r"(\d{3,6})\s*-", sorted(g["adlar"])[0])
         pid = None
         for r in conn.execute("SELECT v.playlist_id, p.alias FROM videos v JOIN playlists p ON p.id=v.playlist_id "
                               "WHERE v.video_id=?", (vid,)).fetchall():
@@ -1829,6 +1880,10 @@ def sync_two_phase(conn, playlist_id=None, log=print, should_cancel=None, on_pha
         liste_disi_klasorlerini_tasi(conn, log=log)
     except Exception as e:
         log(f"  [!] klasor gecisi hatasi: {e}")
+    try:                                   # eski surumun biriktirdigi tekrarli sira numaralarini temizle
+        numara_tekrarlarini_onar(conn, log=log)
+    except Exception as e:
+        log(f"  [!] numara onarma hatasi: {e}")
     local = {}
     for name, fn in (("manuel", sync_manual_collections),
                      ("baglama", scan_and_relink_files),
