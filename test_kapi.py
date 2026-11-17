@@ -735,6 +735,28 @@ class Kapilar(unittest.TestCase):
         core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=lambda m: None)
         self.assertEqual(sorted(p.split("[")[1][:11] for p in self.indirilen), ["VIDNORMAL01", "VIDNORMAL02", "VIDPREMIER1"])
 
+    def test_premiyer_kaydi_listeden_cikmis_sayildiysa_listede_gorununce_kendiliginden_aktif_olur(self):
+        """Ara surum premiyerleri listeden cikarip 'liste disi' yapabildi: son surum bunlari kendiliginden duzeltir."""
+        core = self.core
+        durum = {"liste_var": False}
+
+        def meta(url, *a, **k):
+            ids = ["VIDNORMAL01", "VIDPREMIER1", "VIDNORMAL02"]
+            return {"title": "k", "entries": [
+                {"id": v, "title": "T" + v, "uploader": "u", "duration": 100, "url": "https://www.youtube.com/watch?v=" + v,
+                 "live_status": "is_upcoming" if v == "VIDPREMIER1" else None, "playlist_index": i + 1}
+                for i, v in enumerate(ids) if durum["liste_var"] or v != "VIDPREMIER1"]}
+
+        self._ham_meta = meta
+        self.kapiyi_tak()
+        self._indirme_kur()
+        self.satir("VIDPREMIER1", "Klix", status="removed_from_playlist", file_path=None)     # ara surumun biraktigi durum
+        durum["liste_var"] = True
+        s = core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=lambda m: None)
+        self.assertEqual(self.conn.execute("SELECT status FROM videos WHERE video_id='VIDPREMIER1'").fetchone()[0], "active")
+        self.assertFalse(any("VIDPREMIER1" in p for p in self.indirilen))                    # hala premiyer: indirilmeye calisilmaz
+        self.assertEqual(s["errors"], 0)
+
     # --- DEPOLAMA KAPISI (birincil dolunca ek depo / hepsi doluysa temiz durma) ---
     def _depo_hazirla(self, ana_mb, ek_mb):
         core = self.core
