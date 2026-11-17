@@ -723,7 +723,13 @@ class Kapilar(unittest.TestCase):
         self.assertEqual(indirilen, ["VIDNORMAL01", "VIDNORMAL02"])                 # yayinlanmamis olan denenmedi bile
         self.assertEqual(s["errors"], 0)
         self.assertFalse(any("HATA" in x for x in satirlar), satirlar)
-        self.assertIsNone(self.conn.execute("SELECT 1 FROM videos WHERE video_id='VIDPREMIER1'").fetchone())
+        self.assertEqual(s["yakinda"], 1)
+        # girdi listede KALIR: kaydi dursun (aktif, dosyasiz), listeden cikmis sayilmasin
+        self.assertEqual(tuple(self.conn.execute("SELECT status, file_path FROM videos WHERE video_id='VIDPREMIER1'").fetchone()),
+                         ("active", None))
+        s_tekrar = core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=satirlar.append)          # tekrar: yine sessiz
+        self.assertEqual((s_tekrar["errors"], s_tekrar["yakinda"]), (0, 1))
+        self.assertFalse(any("HATA" in x for x in satirlar), satirlar)
         self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events WHERE event_type='download_failed'").fetchone()[0], 0)
         durum["VIDPREMIER1"] = None                                                  # prömiyer yapildi
         core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=lambda m: None)

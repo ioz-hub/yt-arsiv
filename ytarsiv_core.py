@@ -299,6 +299,9 @@ _last_download_end = None
 
 def download_video(video_url, dest_dir, playlist_index=None):
     global _last_download_end
+    if _yakinda_mi(video_url):             # planli premiyer: YouTube indirtmez; hata sayilmaz, yayinlaninca kendiliginden iner
+        _yakinda_atla()
+        return None
     hedef = depo_sec(dest_dir)            # TEK depo kapisi: yer yoksa ek depoya yonlendirir, hepsi doluysa indirmeyi atlar
     if hedef is None:
         _depo_doldu(dest_dir)
@@ -541,16 +544,11 @@ def fetch_playlist_meta(url, *a, **k):
     if rows and isinstance(meta, dict) and meta.get("entries"):
         haric = {r[0] for r in rows}
         meta["entries"] = [e for e in meta["entries"] if (e or {}).get("id") not in haric]
-    if isinstance(meta, dict) and meta.get("entries"):
-        # HENUZ YAYINLANMAMIS (planli premiyer / canli yayin, live_status=is_upcoming) videolar indirilemez: YouTube "Premieres in ..."
-        # der.  Kaydedilmez/numaralanmaz/indirilmeye calisilmaz (her taramada sahte "indirilemedi" hatasi olurdu); yayinlaninca liste
-        # okumasinda bu isaret kalkar ve video kendiliginden iner.
-        kalan = [e for e in meta["entries"] if (e or {}).get("live_status") != "is_upcoming"]
-        if len(kalan) != len(meta["entries"]):
-            log = k.get("log")
-            if log:
-                log(f"  [~] {len(meta['entries']) - len(kalan)} video henuz yayinlanmadi (planli premiyer), atlandi; yayinlaninca otomatik iner")
-            meta["entries"] = kalan
+    if isinstance(meta, dict) and meta.get("entries") is not None:
+        # HENUZ YAYINLANMAMIS (planli premiyer, live_status=is_upcoming): girdi listede KALIR (listeden cikmis sayilmasin, kaydi ve
+        # numarasi dursun) ama indirilmeye calisilmaz - bkz. download_video + _yakinda_atla.  Her okumada o listenin kumesi YENILENIR:
+        # video yayinlaninca isaret kalkar ve kendiliginden iner.
+        _YAKINDA[url] = {e.get("id") for e in meta["entries"] if e and e.get("live_status") == "is_upcoming"}
     if isinstance(meta, dict) and meta.get("entries") and kanal_mi(url):
         meta["entries"] = _kanal_sirasini_cevir(meta["entries"])
     _basliksizlari_dogrula(meta, k.get("log"))
@@ -1175,7 +1173,25 @@ import shutil as _shutil_depo
 
 DEPO_VARSAYILAN_MIN_BOS_MB = 2048          # bir depoda bundan az yer kalirsa o depoya yeni indirme baslamaz
 _MIB = 1024 * 1024
-_DEPO = {"dolu": False, "atlanan": 0, "yonlendirilen": 0, "log": None}
+_DEPO = {"dolu": False, "atlanan": 0, "yonlendirilen": 0, "log": None, "yakinda": 0, "sessiz_log": 0, "sessiz_olay": 0}
+_YAKINDA = {}                       # playlist url -> henuz yayinlanmamis (live_status=is_upcoming) video idleri (o listenin SON okumasi)
+_YAKINDA_URL_RE = re.compile(r"[?&]v=([A-Za-z0-9_-]{11})")
+
+
+def _yakinda_mi(video_url):
+    m = _YAKINDA_URL_RE.search(str(video_url))
+    return bool(m) and any(m.group(1) in idler for idler in _YAKINDA.values())
+
+
+def _yakinda_atla():
+    """Planli premiyer indirilmez (YouTube: "Premieres in ..."): sayar, cekirdegin ardindan yazacagi TEK 'HATA: indirilemedi' satiri ve
+    'download_failed' olayi bastirilir (gercek hata degil; yayinlaninca kendiliginden iner)."""
+    _DEPO["yakinda"] += 1
+    _DEPO["sessiz_log"] += 1
+    _DEPO["sessiz_olay"] += 1
+    log = _DEPO["log"]
+    if log:
+        log("      [~] henuz yayinlanmadi (planli premiyer), atlandi; yayinlaninca otomatik iner")
 
 
 def _depo_ham_ayar():
@@ -1370,8 +1386,12 @@ def _depo_doldu(dest_dir):
 
 def _depo_logu(log):
     def f(msg):
-        if _DEPO["dolu"] and "HATA: indirilemedi" in str(msg):
-            return
+        if "HATA: indirilemedi" in str(msg):
+            if _DEPO["sessiz_log"] > 0:                 # planli premiyer: hata degil
+                _DEPO["sessiz_log"] -= 1
+                return
+            if _DEPO["dolu"]:
+                return
         log(msg)
     return f
 
@@ -1384,8 +1404,12 @@ class _DepoSusturma:
         orig = self._orig
 
         def log_event(conn, event_type, *a, **k):
-            if event_type == "download_failed" and _DEPO["dolu"]:
-                return None
+            if event_type == "download_failed":
+                if _DEPO["sessiz_olay"] > 0:             # planli premiyer: hata degil
+                    _DEPO["sessiz_olay"] -= 1
+                    return None
+                if _DEPO["dolu"]:
+                    return None
             return orig(conn, event_type, *a, **k)
 
         _cached.log_event = log_event
@@ -1954,7 +1978,7 @@ def sync_two_phase(conn, playlist_id=None, log=print, should_cancel=None, on_pha
         if pid is not None and pid not in pids:
             pids.append(pid)
     log(f"\n=== 3/3 INDIRME: {n_def} video, {len(pids)} playlist ===")
-    _DEPO.update(dolu=False, atlanan=0, yonlendirilen=0, log=log)
+    _DEPO.update(dolu=False, atlanan=0, yonlendirilen=0, yakinda=0, sessiz_log=0, sessiz_olay=0, log=log)
     try:
         with _DepoSusturma():
             for pid in pids:
@@ -1969,7 +1993,8 @@ def sync_two_phase(conn, playlist_id=None, log=print, should_cancel=None, on_pha
         _DEPO["log"] = None
     summary["depo_dolu"] = _DEPO["atlanan"]                    # yer olmadigi icin atlanan/yarim kalan indirme sayisi
     summary["depo_yonlendirilen"] = _DEPO["yonlendirilen"]     # birincil dolu oldugu icin ek depoya giden indirme sayisi
-    summary["errors"] = max(0, summary.get("errors", 0) - _DEPO["atlanan"])   # depo dolulugu "indirme hatasi" sayilmaz
+    summary["yakinda"] = _DEPO["yakinda"]                      # henuz yayinlanmadigi icin atlanan planli premiyer sayisi
+    summary["errors"] = max(0, summary.get("errors", 0) - _DEPO["atlanan"] - _DEPO["yakinda"])   # ikisi de "indirme hatasi" sayilmaz
     return summary
 
 # ---------------------------------------------------------------------------
