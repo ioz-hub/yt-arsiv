@@ -541,6 +541,16 @@ def fetch_playlist_meta(url, *a, **k):
     if rows and isinstance(meta, dict) and meta.get("entries"):
         haric = {r[0] for r in rows}
         meta["entries"] = [e for e in meta["entries"] if (e or {}).get("id") not in haric]
+    if isinstance(meta, dict) and meta.get("entries"):
+        # HENUZ YAYINLANMAMIS (planli premiyer / canli yayin, live_status=is_upcoming) videolar indirilemez: YouTube "Premieres in ..."
+        # der.  Kaydedilmez/numaralanmaz/indirilmeye calisilmaz (her taramada sahte "indirilemedi" hatasi olurdu); yayinlaninca liste
+        # okumasinda bu isaret kalkar ve video kendiliginden iner.
+        kalan = [e for e in meta["entries"] if (e or {}).get("live_status") != "is_upcoming"]
+        if len(kalan) != len(meta["entries"]):
+            log = k.get("log")
+            if log:
+                log(f"  [~] {len(meta['entries']) - len(kalan)} video henuz yayinlanmadi (planli premiyer), atlandi; yayinlaninca otomatik iner")
+            meta["entries"] = kalan
     if isinstance(meta, dict) and meta.get("entries") and kanal_mi(url):
         meta["entries"] = _kanal_sirasini_cevir(meta["entries"])
     _basliksizlari_dogrula(meta, k.get("log"))

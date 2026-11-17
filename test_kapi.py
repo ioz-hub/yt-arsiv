@@ -703,6 +703,32 @@ class Kapilar(unittest.TestCase):
             fp = self.conn.execute("SELECT file_path FROM videos WHERE video_id=? AND playlist_id=?", (vid, pid)).fetchone()[0]
             self.assertTrue(Path(fp.replace(chr(92), "/")).name.startswith(f"{n:03d} - "), (vid, fp))
 
+    def test_yayinlanmamis_premiyer_atlanir_hata_sayilmaz_ve_yayinlaninca_iner(self):
+        core = self.core
+        durum = {"VIDPREMIER1": "is_upcoming"}
+
+        def meta(url, *a, **k):
+            ids = ["VIDNORMAL01", "VIDPREMIER1", "VIDNORMAL02"]
+            return {"title": "k", "entries": [
+                {"id": v, "title": "T" + v, "uploader": "u", "duration": None if durum.get(v) else 100,
+                 "live_status": durum.get(v), "url": "https://www.youtube.com/watch?v=" + v, "playlist_index": i + 1}
+                for i, v in enumerate(ids)]}
+
+        self._ham_meta = meta
+        self.kapiyi_tak()
+        self._indirme_kur()
+        satirlar = []
+        s = core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=satirlar.append)
+        indirilen = sorted(p.split("[")[1][:11] for p in self.indirilen)
+        self.assertEqual(indirilen, ["VIDNORMAL01", "VIDNORMAL02"])                 # yayinlanmamis olan denenmedi bile
+        self.assertEqual(s["errors"], 0)
+        self.assertFalse(any("HATA" in x for x in satirlar), satirlar)
+        self.assertIsNone(self.conn.execute("SELECT 1 FROM videos WHERE video_id='VIDPREMIER1'").fetchone())
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events WHERE event_type='download_failed'").fetchone()[0], 0)
+        durum["VIDPREMIER1"] = None                                                  # prömiyer yapildi
+        core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=lambda m: None)
+        self.assertEqual(sorted(p.split("[")[1][:11] for p in self.indirilen), ["VIDNORMAL01", "VIDNORMAL02", "VIDPREMIER1"])
+
     # --- DEPOLAMA KAPISI (birincil dolunca ek depo / hepsi doluysa temiz durma) ---
     def _depo_hazirla(self, ana_mb, ek_mb):
         core = self.core
