@@ -826,6 +826,50 @@ class Kapilar(unittest.TestCase):
         core.CONFIG_FILE.write_text("{bozuk", encoding="utf-8")
         self.assertEqual(core.depo_ayarlari(), {"ek_depolar": [], "min_bos_mb": core.DEPO_VARSAYILAN_MIN_BOS_MB})
 
+    def test_bozuk_ayar_dosyasinin_uzerine_yazilmaz(self):
+        """Bozuk config.json bos sayilip uzerine yazilirsa 'root_path' ve ek depolar sessizce kaybolurdu: yazma reddedilir."""
+        core = self.core
+        core.CONFIG_FILE.write_text('{"root_path": "D:/Arsiv", bozuk', encoding="utf-8")
+        once = core.CONFIG_FILE.read_text(encoding="utf-8")
+        self.assertEqual(core.depo_min_bos_ayarla(500)[0], False)
+        ok, mesaj = core.depo_ekle(self.tmp / "ek9")
+        self.assertFalse(ok)
+        self.assertIn("bozuk", mesaj)
+        self.assertEqual(core.indirme_ayarlari_yaz(1, 2, 20, 1080)[0], False)
+        with self.assertRaises(core.AyarHatasi):
+            core.depo_ayarlari_yaz(min_bos_mb=1)
+        self.assertEqual(core.CONFIG_FILE.read_text(encoding="utf-8"), once, "bozuk dosyaya dokunulmamali")
+        core.CONFIG_FILE.unlink()                                        # dosya YOKSA yazilir (bozukluk degil)
+        self.assertEqual(core.depo_min_bos_ayarla(500), (True, 500))
+
+    def test_indirme_ayarlari_kapisi_dogrular_yazar_ve_indirme_ondan_okur(self):
+        import json
+        core = self.core
+        self._indirme_kur()                                              # DOWNLOAD_PAUSE_SECONDS = (0, 0)
+        self.assertEqual(core.indirme_ayarlari(), {"bekleme": (0, 0), "uzun_dk": 20, "uzun_p": 1080})
+        core.CONFIG_FILE.write_text('{"baska": 7}', encoding="utf-8")
+        for kotu in ((5, 2, 20, 1080), (-1, 2, 20, 1080), (1, 4000, 20, 1080), (1, 2, 0, 1080), (1, 2, 20, 999), ("a", 2, 20, 1080)):
+            self.assertFalse(core.indirme_ayarlari_yaz(*kotu)[0], kotu)
+        self.assertEqual(core.indirme_ayarlari_yaz(" 3 ", "7,5", 45, 720), (True, {"bekleme": (3.0, 7.5), "uzun_dk": 45, "uzun_p": 720}))
+        cfg = json.loads(core.CONFIG_FILE.read_text(encoding="utf-8"))
+        self.assertEqual((cfg["baska"], cfg["indirme_bekleme_sn"], cfg["uzun_video_dk"], cfg["uzun_video_p"]), (7, [3.0, 7.5], 45, 720))
+        self.assertEqual(core._uzun_video_formati(720), "bv*[height<=720]+ba/b[height<=720]/bv*+ba/b")
+        self.assertIsNone(core._uzun_video_formati(0), "0 = sinir yok")
+        # gecersiz kayitli deger -> varsayilan
+        core.CONFIG_FILE.write_text('{"indirme_bekleme_sn": [9, 1], "uzun_video_dk": "x", "uzun_video_p": 123}', encoding="utf-8")
+        self.assertEqual(core.indirme_ayarlari(), {"bekleme": (0, 0), "uzun_dk": 20, "uzun_p": 1080})
+        # indirme kapisi beklemeyi AYARDAN okur
+        core.CONFIG_FILE.write_text('{"indirme_bekleme_sn": [11, 11]}', encoding="utf-8")
+        uyku = []
+        core._time.sleep = uyku.append
+        core._last_download_end = core._time.monotonic()
+        core.download_video("https://www.youtube.com/watch?v=AAAAAAAAAA1", core.DOWNLOADS / "Klix", 1)
+        self.assertEqual(len(uyku), 1)
+        self.assertTrue(10 < uyku[0] <= 11, uyku)
+        bilgi = core.ortam_bilgisi()
+        self.assertEqual(bilgi["ayar_dosyasi"], str(core.CONFIG_FILE))
+        self.assertFalse(bilgi["ayar_dosyasi_bozuk"])
+
     def test_depo_ekle_dogrular_ve_kaldir_dosyalara_dokunmaz(self):
         core = self.core
         ek = self.tmp / "ek1"
@@ -1943,7 +1987,8 @@ class ListeDisiCokluSil(unittest.TestCase):
         ]
         self.logs, self.yenilendi = [], []
         g = self.gui
-        self.fake = types.SimpleNamespace(conn=None, log=self.logs.append, _refresh_all=lambda: self.yenilendi.append(1))
+        self.fake = types.SimpleNamespace(conn=None, log=self.logs.append, _refresh_all=lambda: self.yenilendi.append(1),
+                                          _mesgul=lambda: False)
         self.fake._selected_lost_rows = lambda: list(self.rows)
         self.fake._lost_hedefleri = lambda r: g.App._lost_hedefleri(self.fake, r)
         self.fake._lost_ozet_metni = lambda r, h: g.App._lost_ozet_metni(self.fake, r, h)
@@ -1972,8 +2017,8 @@ class ListeDisiCokluSil(unittest.TestCase):
         self.gui.core.kopya_kaldir = sahte
         self.gui.App.on_delete_lost_permanent(self.fake)
         self.assertEqual(self.cagrilar, [("AAAAAAAAAAA", 1), ("BBBBBBBBBBB", 2), ("BBBBBBBBBBB", 3), ("CCCCCCCCCCC", 1)])
-        self.assertIn("3 video, 4 DB kaydi", self.onay["metin"])
-        self.assertTrue(any("2 kayit silindi, 2 hata" in m for m in self.logs), self.logs)
+        self.assertIn("3 video, 4 DB kaydı", self.onay["metin"])
+        self.assertTrue(any("2 kayıt silindi, 2 hata" in m for m in self.logs), self.logs)
         self.assertEqual(self.yenilendi, [1])
 
     def test_onay_verilmezse_hicbir_sey_silinmez(self):
@@ -2037,12 +2082,15 @@ class StatikKapilar(unittest.TestCase):
         self.assertEqual(core.count("disk_usage("), 3, "disk_usage yalniz: _ShutilBag, _depo_bos, depo_durumu")
         self.assertEqual(core.count("os.replace(gecici, CONFIG_FILE)"), 1, "config.json TEK yazma kapisi")
         self.assertEqual(core.count("def depo_sec("), 1)
+        self.assertEqual(core.count("DOWNLOAD_PAUSE_SECONDS"), 3, "tanim + docstring + indirme_ayarlari varsayilani; indirme ayardan okur")
+        self.assertIn('_random.uniform(*indirme_ayarlari()["bekleme"])', core)
         m = _re.search(r"def download_video\(video_url, dest_dir, playlist_index=None\):.*?(?=\n\n\n)", core, _re.S)
         self.assertIsNotNone(m)
         self.assertIn("depo_sec(dest_dir)", m.group(0), "indirme depo kapisini atliyor")
         for ad in ("YT-Arsiv-GUI.pyw", "yt-arsiv.py"):
             src = (HERE / ad).read_text(encoding="utf-8")
-            for yasak in ("disk_usage", "config.json", "CONFIG_FILE", '"ek_depolar"', "'ek_depolar'", '"min_bos_mb"', "'min_bos_mb'"):
+            for yasak in ("disk_usage", "config.json", "CONFIG_FILE", '"ek_depolar"', "'ek_depolar'", '"min_bos_mb"', "'min_bos_mb'",
+                          "indirme_bekleme_sn", "uzun_video_dk", "uzun_video_p", "_ayar_yaz", "DOWNLOAD_PAUSE_SECONDS", "LONG_VIDEO"):
                 self.assertNotIn(yasak, src, f"{ad}: depo ayari/bos yer kontrolu kapi disinda ({yasak})")
 
     def test_bilinmeyen_taramalari_yalniz_kontrolorden_cagrilir(self):
@@ -2094,14 +2142,61 @@ class StatikKapilar(unittest.TestCase):
         self.assertEqual(len(re.findall(r"INSERT OR REPLACE INTO ses_", core)), 2, "ses tablolarina yazma 2 kapidan")
         self.assertNotIn("DELETE FROM ses_", core)
 
+    def test_gui_yazan_eylemler_mesgul_kapisindan_gecer(self):
+        """Arka planda is surerken DB/dosya degistiren hicbir GUI eylemi baslamaz: hepsi App._mesgul kapisini cagirir."""
+        src = (HERE / "YT-Arsiv-GUI.pyw").read_text(encoding="utf-8")
+        for ad in ("on_add", "on_delete_playlist", "on_una_delete", "on_dup_delete_selected_files",
+                   "on_delete_lost_record_only", "on_delete_lost_permanent"):
+            m = re.search(rf"    def {ad}\(self\):.*?(?=\n    def )", src, re.S)
+            self.assertIsNotNone(m, ad)
+            self.assertIn("self._mesgul()", m.group(0), f"{ad}: mesgul kapisini atliyor")
+        for ad in ("_silinme_sor", "_depolama_paneli"):                       # pencere ici islemler (uygula / ekle / kaldir)
+            m = re.search(rf"    def {ad}\(self.*?(?=\n    def |\n    # ------)", src, re.S)
+            self.assertIn("self._mesgul()", m.group(0), ad)
+        # playlist silme: iki ayri onay, ikisinde de varsayilan dugme HAYIR (Enter ile dosya silinmesin)
+        govde = re.search(r"    def on_delete_playlist\(self\):.*?(?=\n    def )", src, re.S).group(0)
+        self.assertEqual(govde.count('default="no"'), 2)
+        self.assertNotIn("askyesnocancel", src)
+        self.assertEqual(src.count("WM_DELETE_WINDOW"), 1, "pencere kapatma tek yerden (on_close) sorulur")
+
+    def test_gui_ilerleme_ve_gunluk_dosyasi_tek_kapidan(self):
+        src = (HERE / "YT-Arsiv-GUI.pyw").read_text(encoding="utf-8")
+        self.assertEqual(src.count("self.progress.start("), 1, "ilerleme cubugu yalniz _ilerleme'den surulur")
+        self.assertEqual(src.count("self.progress.stop("), 1)
+        govde = re.search(r"    def _gunluge_yaz\(self.*?(?=\n    def )", src, re.S).group(0)
+        self.assertIn("open(GUNLUK_KLASORU", govde)
+        self.assertEqual(src.count("open(GUNLUK_KLASORU"), 1, "gunluk dosyasi yalniz _gunluge_yaz'dan acilir")
+        self.assertEqual(src.count("_gunluk_dosyasi.write("), 1)
+
+    def test_gui_gunluk_satiri_renk_etiketi(self):
+        import importlib.util
+        import os
+        spec = importlib.util.spec_from_file_location("gui_etiket", HERE / "YT-Arsiv-GUI.pyw")
+        gui = importlib.util.module_from_spec(spec)
+        cwd = os.getcwd()
+        sys.path.insert(0, str(HERE))
+        try:
+            spec.loader.exec_module(gui)
+        finally:
+            sys.path.remove(str(HERE))
+            os.chdir(cwd)
+        e = gui.App._gunluk_etiketi
+        self.assertEqual(e("  [!] indirilemedi"), "hata")
+        self.assertEqual(e("      HATA: indirilemedi: x"), "hata")
+        self.assertEqual(e("  [?] 3 video onay bekliyor"), "uyari")
+        self.assertEqual(e("[+] 2 dosya baglandi"), "iyi")
+        self.assertEqual(e("=== 1/3 TARAMA ==="), "baslik")
+        self.assertEqual(e("Hata                    : 0"), "", "ozet satiri hata sayilmaz")
+        self.assertEqual(e("siradan satir"), "")
+
     def test_gui_inceleme_yok_ve_silme_tek_kapidan(self):
         src = (HERE / "YT-Arsiv-GUI.pyw").read_text(encoding="utf-8")
         self.assertNotIn("inceleme", src.lower(), "GUI'de Inceleme kalintisi var")
         self.assertNotIn("DELETE FROM videos", src, "GUI kaydi kapiyi atlayarak siliyor")
         self.assertNotIn("_silinenler", src, "GUI'de eski klasor adi kalmis (artik _ListeDisi)")
         self.assertNotIn("Kayip Videolar", src, "sekme artik 'Liste Disi'")
-        self.assertIn('text="Liste Disi"', src)
-        self.assertIn('text="Yayindan Kalkan"', src)
+        self.assertIn('text="Liste Dışı"', src)
+        self.assertIn('text="Yayından Kalkan"', src)
         self.assertIn("core.yayindan_kalkanlar", src, "Yayindan Kalkan sekmesi okuma kapisini kullanmiyor")
         # Ayni Videolar silme isleyicisi YALNIZ kopya_kaldir kapisini kullanir (Kayip sekmesi ayri is).
         a = src.index("    def on_dup_delete_selected_files(self):")

@@ -272,8 +272,9 @@ try:
                     return retry.extract_info(url, *args, **kwargs)
 
         def process_video_result(self, info_dict, download=True):
+            ayar = indirme_ayarlari()            # TEK okuma kapisi (uzun video esigi + en yuksek cozunurluk)
             fmt = _CappedYoutubeDL.FORMAT_ZORLA or (
-                LONG_VIDEO_FORMAT if (info_dict.get("duration") or 0) > LONG_VIDEO_SECONDS else None)
+                _uzun_video_formati(ayar["uzun_p"]) if (info_dict.get("duration") or 0) > ayar["uzun_dk"] * 60 else None)
             if download and fmt:
                 saved = self.format_selector
                 self.format_selector = self.build_format_selector(fmt)
@@ -310,7 +311,7 @@ def download_video(video_url, dest_dir, playlist_index=None):
         _DEPO["yonlendirilen"] += 1
         dest_dir = hedef
     if _last_download_end is not None:
-        wait = _random.uniform(*DOWNLOAD_PAUSE_SECONDS) - (_time.monotonic() - _last_download_end)
+        wait = _random.uniform(*indirme_ayarlari()["bekleme"]) - (_time.monotonic() - _last_download_end)
         if wait > 0:
             _time.sleep(wait)
     try:
@@ -1220,16 +1221,114 @@ def depo_ayarlari():
     return {"ek_depolar": ek, "min_bos_mb": max(0, mb)}
 
 
-def depo_ayarlari_yaz(ek_depolar=None, min_bos_mb=None):
-    """config.json'a depo ayarlarini yazan TEK kapi (atomik; 'root_path' gibi diger anahtarlara dokunmaz)."""
+class AyarHatasi(Exception):
+    """config.json yazilamadi (ornegin mevcut dosya bozuk oldugu icin uzerine yazilmadi)."""
+
+
+def _ayar_bozuk():
+    """config.json VAR ama okunamiyor / sozluk degil mi?  (Yok olmasi bozukluk degildir.)"""
+    try:
+        if not CONFIG_FILE.exists():
+            return False
+        return not isinstance(_json_depo.loads(CONFIG_FILE.read_text(encoding="utf-8")), dict)
+    except Exception:
+        return True
+
+
+def _ayar_yaz(guncelle):
+    """config.json'a yazan TEK kapi (atomik; verilmeyen anahtarlara - 'root_path' dahil - dokunmaz).
+    Mevcut dosya BOZUKSA yazmaz (AyarHatasi): bozuk dosya bos sayilip uzerine yazilirsa icindeki 'root_path' ve ek depolar
+    sessizce kaybolurdu; kullanici dosyayi duzeltmeli ya da silmelidir."""
+    if _ayar_bozuk():
+        raise AyarHatasi(f"ayar dosyasi okunamiyor (bozuk), uzerine yazilmadi: {CONFIG_FILE}  -  dosyayi duzeltin ya da silin")
     cfg = _depo_ham_ayar()
-    if ek_depolar is not None:
-        cfg["ek_depolar"] = [str(p) for p in ek_depolar]
-    if min_bos_mb is not None:
-        cfg["min_bos_mb"] = int(min_bos_mb)
+    cfg.update(guncelle)
     gecici = CONFIG_FILE.with_name(CONFIG_FILE.name + ".tmp")
     gecici.write_text(_json_depo.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(gecici, CONFIG_FILE)
+
+
+def depo_ayarlari_yaz(ek_depolar=None, min_bos_mb=None):
+    """Depo ayarlarini yazar (_ayar_yaz kapisindan)."""
+    guncelle = {}
+    if ek_depolar is not None:
+        guncelle["ek_depolar"] = [str(p) for p in ek_depolar]
+    if min_bos_mb is not None:
+        guncelle["min_bos_mb"] = int(min_bos_mb)
+    _ayar_yaz(guncelle)
+
+
+# ---------------------------------------------------------------------------
+# KAPI: INDIRME AYARLARI (config.json: 'indirme_bekleme_sn' = [en_az, en_cok], 'uzun_video_dk', 'uzun_video_p').
+#   indirme_ayarlari       TEK okuma kapisi (download_video ve _CappedYoutubeDL buradan okur; yoksa modul varsayilanlari)
+#   indirme_ayarlari_yaz   dogrulayan kontrolor (GUI/CLI yalniz bunu cagirir); yazma _ayar_yaz kapisindan
+# ---------------------------------------------------------------------------
+UZUN_VIDEO_COZUNURLUKLERI = (0, 480, 720, 1080, 1440, 2160)        # 0 = sinir yok (en iyi kalite)
+
+
+def _uzun_video_formati(p):
+    return f"bv*[height<={p}]+ba/b[height<={p}]/bv*+ba/b" if p else None
+
+
+def indirme_ayarlari():
+    """{'bekleme': (en_az_sn, en_cok_sn), 'uzun_dk': int, 'uzun_p': int}.  Ayar yok / gecersizse varsayilan:
+    DOWNLOAD_PAUSE_SECONDS, LONG_VIDEO_SECONDS, 1080p."""
+    cfg = _depo_ham_ayar()
+    try:
+        a, b = (float(x) for x in cfg["indirme_bekleme_sn"])
+        if not 0 <= a <= b <= 3600:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        a, b = DOWNLOAD_PAUSE_SECONDS
+    try:
+        dk = int(cfg["uzun_video_dk"])
+        if not 1 <= dk <= 1440:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        dk = LONG_VIDEO_SECONDS // 60
+    try:
+        p = int(cfg["uzun_video_p"])
+        if p not in UZUN_VIDEO_COZUNURLUKLERI:
+            raise ValueError
+    except (KeyError, TypeError, ValueError):
+        p = 1080
+    return {"bekleme": (a, b), "uzun_dk": dk, "uzun_p": p}
+
+
+def indirme_ayarlari_yaz(bekleme_en_az, bekleme_en_cok, uzun_dk, uzun_p):
+    """Kontrolor: dogrular ve yazar.  Doner: (True, indirme_ayarlari()) | (False, hata_metni)."""
+    try:
+        a, b = float(str(bekleme_en_az).strip().replace(",", ".")), float(str(bekleme_en_cok).strip().replace(",", "."))
+        dk, p = int(str(uzun_dk).strip()), int(str(uzun_p).strip())
+    except ValueError:
+        return False, "sayi girin"
+    if not 0 <= a <= b <= 3600:
+        return False, "bekleme: 0-3600 sn arasinda ve en az <= en cok olmali"
+    if not 1 <= dk <= 1440:
+        return False, "uzun video esigi 1-1440 dakika arasinda olmali"
+    if p not in UZUN_VIDEO_COZUNURLUKLERI:
+        return False, "cozunurluk su degerlerden biri olmali: " + ", ".join(str(x) for x in UZUN_VIDEO_COZUNURLUKLERI) + " (0 = sinir yok)"
+    try:
+        _ayar_yaz({"indirme_bekleme_sn": [a, b], "uzun_video_dk": dk, "uzun_video_p": p})
+    except AyarHatasi as e:
+        return False, str(e)
+    return True, indirme_ayarlari()
+
+
+def ortam_bilgisi():
+    """YALNIZ OKUR.  Ayarlar > Bilgi sayfasi ve CLI icin: konumlar + arac/surum durumu."""
+    import platform as _platform
+    import shutil as _sh
+    try:
+        ytdlp = _yt_dlp.version.__version__
+    except Exception:
+        ytdlp = None
+    return {
+        "uygulama": str(UYGULAMA_DIZINI), "veritabani": str(DB_PATH), "arsiv": str(_cached.DOWNLOADS), "ayar_dosyasi": str(CONFIG_FILE),
+        "ayar_dosyasi_bozuk": _ayar_bozuk(), "python": _platform.python_version(), "yt_dlp": ytdlp,
+        "ffmpeg": _sh.which("ffmpeg"), "ses_araci": os.fspath(SES_ARACI) if SES_ARACI.is_file() else None,   # yalniz yol bilgisi (calistirmaz)
+        "cerez": str(COOKIES_FILE) if COOKIES_FILE.is_file() else None, "cerez_yolu": str(COOKIES_FILE),
+    }
 
 
 def depo_min_bos_mb():
@@ -1244,7 +1343,10 @@ def depo_min_bos_ayarla(mb):
         return False, "sayi girin (MB)"
     if not 0 <= mb <= 10_000_000:
         return False, "0 ile 10.000.000 MB arasinda olmali"
-    depo_ayarlari_yaz(min_bos_mb=mb)
+    try:
+        depo_ayarlari_yaz(min_bos_mb=mb)
+    except AyarHatasi as e:
+        return False, str(e)
     return True, mb
 
 
@@ -1327,7 +1429,10 @@ def depo_ekle(yol):
         deneme.unlink()
     except OSError as e:
         return False, f"klasor olusturulamadi / yazilamiyor: {e}"
-    depo_ayarlari_yaz(ek_depolar=mevcut + [p])
+    try:
+        depo_ayarlari_yaz(ek_depolar=mevcut + [p])
+    except AyarHatasi as e:
+        return False, str(e)
     return True, p
 
 
@@ -1340,7 +1445,10 @@ def depo_kaldir(conn, yol):
         return False, "bu yol ek depo olarak kayitli degil"
     n = sum(1 for (fp,) in conn.execute("SELECT file_path FROM videos WHERE file_path IS NOT NULL")
             if os.path.isabs(fp) and _icinde(fp, hedef))
-    depo_ayarlari_yaz(ek_depolar=[m for m in mevcut if m is not hedef])
+    try:
+        depo_ayarlari_yaz(ek_depolar=[m for m in mevcut if m is not hedef])
+    except AyarHatasi as e:
+        return False, str(e)
     return True, n
 
 

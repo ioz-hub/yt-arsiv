@@ -22,6 +22,9 @@ from ytarsiv_core import (
     depo_kaldir,
     depo_min_bos_ayarla,
     depo_min_bos_mb,
+    indirme_ayarlari,
+    indirme_ayarlari_yaz,
+    ortam_bilgisi,
     kanal_url_duzenle,
     manuel_tarama,
     tum_klasorleri_tara,
@@ -152,6 +155,28 @@ def cmd_depo(args, conn):
               + ("" if d["var"] else "   [TAKILI DEGIL]"))
 
 
+def cmd_ayar(args, conn):
+    ay = indirme_ayarlari()
+    if args.bekleme or args.uzun_dk is not None or args.uzun_p is not None:
+        a, b = args.bekleme or ay["bekleme"]
+        ok, sonuc = indirme_ayarlari_yaz(a, b, ay["uzun_dk"] if args.uzun_dk is None else args.uzun_dk,
+                                         ay["uzun_p"] if args.uzun_p is None else args.uzun_p)
+        if not ok:
+            print(f"Ayarlanamadi: {sonuc}")
+            return
+        ay = sonuc
+    print(f"Indirmeler arasi bekleme : {ay['bekleme'][0]:g} - {ay['bekleme'][1]:g} sn")
+    print(f"Uzun video kalite siniri : {ay['uzun_dk']} dk'dan uzun videolar en fazla "
+          + ("sinirsiz (en iyi kalite)" if not ay["uzun_p"] else f"{ay['uzun_p']}p"))
+    b = ortam_bilgisi()
+    print(f"Arsiv klasoru            : {b['arsiv']}")
+    print(f"Veritabani               : {b['veritabani']}")
+    print(f"Ayar dosyasi             : {b['ayar_dosyasi']}" + ("   [BOZUK]" if b["ayar_dosyasi_bozuk"] else ""))
+    print(f"yt-dlp                   : {b['yt_dlp'] or 'YOK'}")
+    print(f"ffmpeg                   : {b['ffmpeg'] or 'YOK'}")
+    print(f"Cerez dosyasi            : {b['cerez'] or 'yok'}")
+
+
 def cmd_status(args, conn):
     rows = get_lost_videos(conn)
     if not rows:
@@ -228,6 +253,12 @@ def main():
     p.add_argument("--kaldir", help="Ek depoyu listeden kaldir (dosyalar silinmez)")
     p.add_argument("--min-bos", type=int, help="Bir depoda en az bu kadar bos yer (MB) kalmali")
     p.set_defaults(func=cmd_depo)
+
+    p = sub.add_parser("ayar", help="Indirme ayarlari + ortam bilgisi (--bekleme EN_AZ EN_COK / --uzun-dk N / --uzun-p N)")
+    p.add_argument("--bekleme", nargs=2, type=float, metavar=("EN_AZ", "EN_COK"), help="Indirmeler arasi bekleme (saniye)")
+    p.add_argument("--uzun-dk", type=int, help="Bu kadar dakikadan uzun videolara kalite siniri uygulanir")
+    p.add_argument("--uzun-p", type=int, help="Uzun videolar icin en yuksek cozunurluk (0 = sinir yok, 480/720/1080/1440/2160)")
+    p.set_defaults(func=cmd_ayar)
 
     p = sub.add_parser("status", help="Kayip/sorunlu videolari listele")
     p.set_defaults(func=cmd_status)

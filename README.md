@@ -46,6 +46,20 @@ Arayüz:
 Baslat.bat
 ```
 
+Arayüz işleve göre düzenlidir:
+
+- **Araç çubuğu:** `+ Playlist / Kanal Ekle` · `Tümünü Tara` / `Seçiliyi Tara` · `Bakım` · `Ayarlar` · video arama.
+  Onay bekleyen toplu silinme varsa ayrıca `Onay bekleyen: N` düğmesi görünür.
+- **Sekmeler:** `Playlistler`, `Arama` (arşiv) · `Liste Dışı`, `Yayından Kalkan`, `Aynı Videolar` (temizlik; başlıkta
+  kayıt sayısı görünür) · `Geçmiş`. Sütun başlığına tıklayınca tablo o sütuna göre sıralanır.
+- **Bakım menüsü:** silinme onayları, klasör onarımı (kayıp dosyaları yeniden bağlama), elle eklenen klasörlerin
+  taranması, kopya temizliği / ses analizi, yayından kalkanların YouTube'da yeniden kontrolü.
+- **Ayarlar:** `Depolama` (depolar, boş yer sınırı), `İndirme` (indirmeler arası bekleme, uzun videolarda kalite
+  sınırı), `Bilgi` (klasörler, yt-dlp / ffmpeg durumu, çerez dosyası).
+- Arka planda tarama/indirme sürerken silme ve ayar değiştiren işlemler başlatılamaz; pencere kapatılırken sorulur.
+- Günlük ekrandaki panelde ve `logs\gui-YYYYAAGG.log` dosyasında tutulur.
+- Kısayollar: `Ctrl+N` ekle, `Ctrl+T` tümünü tara, `Ctrl+F` arama, `Ctrl+,` ayarlar, `F5` yenile, `Esc` iptal.
+
 Komut satırı:
 
 ```
@@ -58,12 +72,22 @@ python yt-arsiv.py silinme            # onay bekleyen toplu silinmeler (--onayla
 python yt-arsiv.py tara --kuru        # veritabanıyla bağsız dosyaları listele
 python yt-arsiv.py depo               # depoların boş yeri ve kayıt sayısı
 python yt-arsiv.py depo --ekle D:/YT-Arsiv-2    # ek depo ekle
+python yt-arsiv.py ayar               # indirme ayarları + klasörler + yt-dlp/ffmpeg durumu
+python yt-arsiv.py ayar --bekleme 20 40 --uzun-dk 30 --uzun-p 720
 python yt-arsiv.py history --limit 50
 ```
 
+## İndirme ayarları
+
+- **İndirmeler arası bekleme** (varsayılan 30-60 sn): art arda indirmeler arasında bu aralıkta rastgele beklenir.
+  Kısaltmak taramayı hızlandırır ama YouTube'un bot engeline takılma riskini artırır.
+- **Uzun videolarda kalite sınırı** (varsayılan: 20 dakikadan uzun videolar en fazla 1080p): DJ seti gibi uzun
+  videoların diski doldurmaması içindir. `0` / "Sınır yok" en iyi kaliteyi indirir.
+- Ayar dosyası (`config.json`) bozulursa uygulama üzerine yazmaz ve uyarır; dosyayı düzeltin ya da silin.
+
 ## Depolama (disk dolarsa)
 
-Arayüzde **Depolama** düğmesi (komut satırında `depo`) birincil depoyu (`downloads`) ve ek depoları gösterir.
+Arayüzde **Ayarlar > Depolama** (komut satırında `depo`) birincil depoyu (`downloads`) ve ek depoları gösterir.
 
 - Bir depoda **en az 2048 MB** boş yer kalmalıdır (ayarlanabilir); altına düşerse yeni indirme o depoya başlamaz.
 - Birincil depo dolarsa yeni indirmeler sırayla **ek depolara** gider; kayıt dosyanın tam yolunu tutar.
