@@ -56,7 +56,11 @@ Arayüz işleve göre düzenlidir:
   taranması, kopya temizliği / ses analizi, yayından kalkanların YouTube'da yeniden kontrolü.
 - **Ayarlar:** `Depolama` (depolar, boş yer sınırı), `İndirme` (indirmeler arası bekleme, uzun videolarda kalite
   sınırı), `Bilgi` (klasörler, yt-dlp / ffmpeg durumu, çerez dosyası).
-- Arka planda tarama/indirme sürerken silme ve ayar değiştiren işlemler başlatılamaz; pencere kapatılırken sorulur.
+- **İndirme ilerlemesi:** alt çubukta o an inen şarkının yüzdesi ve tüm indirmenin genel yüzdesi ayrı çubuklarla görünür
+  (`İndiriliyor: 12/1000 bitti - Şarkı adı`).
+- **İş sırası:** tarama/indirme sürerken video silme, silinme onayı ve liste ekleme engellenmez; sıraya alınır ve
+  bir dosya inerken ya da indirmeler arasında beklerken yapılır (alt çubukta `Sırada: N iş`). Yalnızca playlist silme
+  ve depo ekleme/kaldırma işin bitmesini bekletir. Pencere kapatılırken sorulur.
 - Günlük ekrandaki panelde ve `logs\gui-YYYYAAGG.log` dosyasında tutulur.
 - Kısayollar: `Ctrl+N` ekle, `Ctrl+T` tümünü tara, `Ctrl+F` arama, `Ctrl+,` ayarlar, `F5` yenile, `Esc` iptal.
 

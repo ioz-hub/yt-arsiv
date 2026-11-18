@@ -826,6 +826,135 @@ class Kapilar(unittest.TestCase):
         core.CONFIG_FILE.write_text("{bozuk", encoding="utf-8")
         self.assertEqual(core.depo_ayarlari(), {"ek_depolar": [], "min_bos_mb": core.DEPO_VARSAYILAN_MIN_BOS_MB})
 
+    def test_is_kilidi_indirme_sirasinda_ara_verir_ve_baska_baglanti_yazabilir(self):
+        """Tarama kilidi tutar; dosya inerken ARA VERIR: sirada bekleyen is (baska is parcacigi + baska DB baglantisi) o arada
+        kilidi alip veritabanina yazabilir.  Indirme bitince kilit taramaya geri doner."""
+        import sqlite3
+        import threading
+        core = self.core
+
+        def meta(url, *a, **k):
+            return {"title": "k", "entries": [
+                {"id": v, "title": "T" + v, "uploader": "u", "duration": 100, "live_status": None,
+                 "url": "https://www.youtube.com/watch?v=" + v, "playlist_index": i + 1}
+                for i, v in enumerate(["VIDKILIT001", "VIDKILIT002"])]}
+
+        self._ham_meta = meta
+        self.kapiyi_tak()
+        self._indirme_kur()
+        asil = core._download_video_orig
+        gozlem = []
+
+        def ham(video_url, dest_dir, playlist_index=None):
+            sonuc = {}
+
+            def sirada_bekleyen_is():                                   # GUI'nin siraya aldigi silme isi gibi: baska is parcacigi
+                sonuc["kilit"] = core.IS_KILIDI.al(bekle=False)
+                if sonuc["kilit"]:
+                    try:
+                        c2 = sqlite3.connect(str(core.DB_PATH), timeout=0.3)
+                        try:
+                            sonuc["yazilabilir"] = core.yazilabilir_mi(c2)
+                            c2.execute("INSERT INTO events (timestamp, video_id, playlist_id, event_type, details) "
+                                       "VALUES ('2026-01-01T00:00:00', 'XXXXXXXXXXX', NULL, 'test_sirada', 'x')")
+                            c2.commit()
+                            sonuc["yazdi"] = True
+                        except sqlite3.OperationalError as e:
+                            sonuc["yazdi"] = str(e)
+                        finally:
+                            c2.close()
+                    finally:
+                        core.IS_KILIDI.birak()
+            t = threading.Thread(target=sirada_bekleyen_is)
+            t.start()
+            t.join(10)
+            gozlem.append((core.IS_KILIDI.bende(), sonuc))
+            return asil(video_url, dest_dir, playlist_index)
+
+        core._download_video_orig = ham
+        self.assertTrue(core.IS_KILIDI.al(bekle=False))                 # GUI iscisi gibi: is boyunca kilit bende
+        try:
+            s = core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=lambda m: None)
+            self.assertTrue(core.IS_KILIDI.bende(), "indirme bitince kilit taramaya geri donmeli")
+            engel = {}
+            t = threading.Thread(target=lambda: engel.setdefault("aldi", core.IS_KILIDI.al(bekle=False)))
+            t.start()
+            t.join(5)
+            self.assertFalse(engel["aldi"], "indirme DISINDA sirada bekleyen is kilidi alamaz")
+        finally:
+            core.IS_KILIDI.birak()
+        self.assertEqual(s["new"], 2)
+        self.assertEqual(len(gozlem), 2)
+        for bende, sonuc in gozlem:
+            self.assertFalse(bende, "indirme sirasinda tarama kilidi birakmis olmali")
+            self.assertEqual(sonuc, {"kilit": True, "yazilabilir": True, "yazdi": True})
+        self.assertEqual(self.conn.execute("SELECT COUNT(*) FROM events WHERE event_type='test_sirada'").fetchone()[0], 2)
+
+    def test_is_kilidi_tutmayan_is_parcaciginda_ara_ver_etkisiz(self):
+        core = self.core                                                # CLI: kilit hic alinmaz
+        self.assertFalse(core.IS_KILIDI.bende())
+        with core.IS_KILIDI.ara_ver():
+            self.assertTrue(core.IS_KILIDI.al(bekle=False), "kilit serbest olmali")
+            core.IS_KILIDI.birak()
+        with core.IS_KILIDI.tut():
+            self.assertTrue(core.IS_KILIDI.bende())
+        self.assertFalse(core.IS_KILIDI.bende())
+        self.assertTrue(core.yazilabilir_mi(self.conn))
+
+    def test_ilerleme_kapisi_sarki_ve_genel_yuzde_dinleyiciye_gider(self):
+        core = self.core
+        # yt-dlp: goruntu (100 B) + ses (300 B) iki parca; yuzde videonun TAMAMI icin 0'dan 100'e tek sefer gider
+        bilgi = {"title": "Sarki", "format_id": "v", "requested_formats": [
+            {"format_id": "v", "filesize": 100}, {"format_id": "a", "filesize": 300}]}
+        d = lambda **k: {"status": "downloading", "total_bytes": 100, "info_dict": dict(bilgi, **k.pop("bilgi", {})), **k}
+        self.assertEqual(round(core._video_yuzdesi(d(downloaded_bytes=50))), 12)             # (0 + 0.5*100) / 400
+        self.assertEqual(round(core._video_yuzdesi({"status": "finished", "info_dict": bilgi})), 25)
+        ses = {"status": "downloading", "total_bytes": 300, "downloaded_bytes": 150, "info_dict": dict(bilgi, format_id="a")}
+        self.assertEqual(round(core._video_yuzdesi(ses)), 62)                                # (100 + 0.5*300) / 400
+        tek = {"title": "T", "format_id": "x", "requested_formats": []}
+        self.assertEqual(round(core._video_yuzdesi({"status": "downloading", "total_bytes": 200, "downloaded_bytes": 50, "info_dict": tek})), 25)
+        # dinleyici: genel sayac biten/toplam, sarki yuzdesi; dinleyen yokken hicbir sey yapilmaz
+        core._ilerleme_kancasi(d(downloaded_bytes=50))                                      # dinleyici yok: hata vermez
+        alinan = []
+        core.ilerleme_dinle(alinan.append)
+        try:
+            core._ILERLEME.update(toplam=3, biten=1)
+            core._ilerleme_kancasi(d(downloaded_bytes=100))
+            self.assertEqual((alinan[-1]["toplam"], alinan[-1]["biten"], alinan[-1]["baslik"]), (3, 1, "Sarki"))
+            self.assertEqual(round(alinan[-1]["video_yuzde"]), 25)
+            core._ilerleme_bitti()
+            self.assertEqual((alinan[-1]["biten"], alinan[-1]["video_yuzde"]), (2, None))
+            n = len(alinan)
+            core._ilerleme_kancasi(d(downloaded_bytes=100))
+            core._ilerleme_kancasi(d(downloaded_bytes=100))                                 # ayni yuzde + <1 sn: bildirim sikismaz
+            self.assertEqual(len(alinan), n + 1)
+            core.ilerleme_dinle(lambda b: 1 / 0)                                            # bozuk dinleyici indirmeyi durdurmaz
+            core._ilerleme_bitti()
+        finally:
+            core.ilerleme_dinle(None)
+        self.assertEqual(core._ILERLEME["toplam"], 0)
+
+    def test_indirme_kapisi_ilerlemeyi_her_sonucta_ilerletir(self):
+        core = self.core
+
+        def meta(url, *a, **k):
+            ids = ["VIDILERL001", "VIDILERL002", "VIDILERL003"]
+            return {"title": "k", "entries": [
+                {"id": v, "title": "T" + v, "uploader": "u", "duration": 100, "live_status": "is_upcoming" if v.endswith("3") else None,
+                 "url": "https://www.youtube.com/watch?v=" + v, "playlist_index": i + 1} for i, v in enumerate(ids)]}
+
+        self._ham_meta = meta
+        self.kapiyi_tak()
+        self._indirme_kur()
+        alinan = []
+        core.ilerleme_dinle(alinan.append)
+        try:
+            core.sync_two_phase(self.conn, playlist_id=self.pid("Klix"), log=lambda m: None)
+        finally:
+            core.ilerleme_dinle(None)
+        son = alinan[-1]
+        self.assertEqual((son["toplam"], son["biten"]), (3, 3), "indi (2) + premiyer atlandi (1) = hepsi bitti")
+
     def test_bozuk_ayar_dosyasinin_uzerine_yazilmaz(self):
         """Bozuk config.json bos sayilip uzerine yazilirsa 'root_path' ve ek depolar sessizce kaybolurdu: yazma reddedilir."""
         core = self.core
@@ -867,6 +996,8 @@ class Kapilar(unittest.TestCase):
         self.assertEqual(len(uyku), 1)
         self.assertTrue(10 < uyku[0] <= 11, uyku)
         bilgi = core.ortam_bilgisi()
+        self.assertRegex(bilgi["surum"], r"^\d+\.\d+\.\d+$")
+        self.assertEqual((HERE / "ytarsiv_core.py").read_text(encoding="utf-8").count("\nSURUM = "), 1, "surum TEK yerde tanimli")
         self.assertEqual(bilgi["ayar_dosyasi"], str(core.CONFIG_FILE))
         self.assertFalse(bilgi["ayar_dosyasi_bozuk"])
 
@@ -1991,7 +2122,7 @@ class ListeDisiCokluSil(unittest.TestCase):
         self.logs, self.yenilendi = [], []
         g = self.gui
         self.fake = types.SimpleNamespace(conn=None, log=self.logs.append, _refresh_all=lambda: self.yenilendi.append(1),
-                                          _mesgul=lambda: False)
+                                          _mesgul=lambda: False, _sirala=lambda ad, is_fn: is_fn())
         self.fake._selected_lost_rows = lambda: list(self.rows)
         self.fake._lost_hedefleri = lambda r: g.App._lost_hedefleri(self.fake, r)
         self.fake._lost_ozet_metni = lambda r, h: g.App._lost_ozet_metni(self.fake, r, h)
@@ -2145,27 +2276,77 @@ class StatikKapilar(unittest.TestCase):
         self.assertEqual(len(re.findall(r"INSERT OR REPLACE INTO ses_", core)), 2, "ses tablolarina yazma 2 kapidan")
         self.assertNotIn("DELETE FROM ses_", core)
 
-    def test_gui_yazan_eylemler_mesgul_kapisindan_gecer(self):
-        """Arka planda is surerken DB/dosya degistiren hicbir GUI eylemi baslamaz: hepsi App._mesgul kapisini cagirir."""
+    def test_gui_yazan_eylemler_kuyruk_ya_da_mesgul_kapisindan_gecer(self):
+        """Arsivi degistiren GUI eylemleri iki kapidan birinden gecer: kisa isler (video silme, onay, ekleme) _sirala ile SIRAYA
+        alinir (indirme surerken engellenmez); siraya alinamayanlar (playlist silme, depo degisikligi) _mesgul ile reddedilir."""
         src = (HERE / "YT-Arsiv-GUI.pyw").read_text(encoding="utf-8")
-        for ad in ("on_add", "on_delete_playlist", "on_una_delete", "on_dup_delete_selected_files",
-                   "on_delete_lost_record_only", "on_delete_lost_permanent"):
-            m = re.search(rf"    def {ad}\(self\):.*?(?=\n    def )", src, re.S)
-            self.assertIsNotNone(m, ad)
-            self.assertIn("self._mesgul()", m.group(0), f"{ad}: mesgul kapisini atliyor")
-        for ad in ("_silinme_sor", "_depolama_paneli"):                       # pencere ici islemler (uygula / ekle / kaldir)
+
+        def govde(ad):
             m = re.search(rf"    def {ad}\(self.*?(?=\n    def |\n    # ------)", src, re.S)
-            self.assertIn("self._mesgul()", m.group(0), ad)
+            self.assertIsNotNone(m, ad)
+            return m.group(0)
+        for ad in ("on_add", "on_una_delete", "on_dup_delete_selected_files", "on_delete_lost_record_only",
+                   "on_delete_lost_permanent", "_silinme_sor"):
+            g = govde(ad)
+            self.assertIn("self._sirala(", g, f"{ad}: is kuyrugu kapisini atliyor")
+            self.assertNotIn("self._mesgul()", g, f"{ad}: indirme surerken engellenmemeli, siraya alinmali")
+            # yazan cekirdek cagrilari yalniz siraya alinan 'calistir' icinde olmali
+            on, _, _ = g.partition("def calistir():")
+            for yazan in ("core.kopya_kaldir(", "core.permanently_delete_video(", "core.add_playlist(", "islem(anahtarlar)", ".unlink()"):
+                self.assertNotIn(yazan, on, f"{ad}: {yazan} siraya alinmadan cagriliyor")
+        for ad in ("on_delete_playlist", "_depolama_paneli"):
+            self.assertIn("self._mesgul()", govde(ad), f"{ad}: mesgul kapisini atliyor")
         # playlist silme: iki ayri onay, ikisinde de varsayilan dugme HAYIR (Enter ile dosya silinmesin)
-        govde = re.search(r"    def on_delete_playlist\(self\):.*?(?=\n    def )", src, re.S).group(0)
-        self.assertEqual(govde.count('default="no"'), 2)
+        self.assertEqual(govde("on_delete_playlist").count('default="no"'), 2)
         self.assertNotIn("askyesnocancel", src)
         self.assertEqual(src.count("WM_DELETE_WINDOW"), 1, "pencere kapatma tek yerden (on_close) sorulur")
+        # arka plan iscileri is boyunca kilidi tutar; kuyruk yalniz kilit + yazilabilirlik yoklamasindan sonra calisir
+        self.assertEqual(src.count("threading.Thread(target="), src.count("threading.Thread(target=self._kilitli("))
+        self.assertGreaterEqual(src.count("threading.Thread(target=self._kilitli("), 6)
+        k = govde("_kuyruk_isle")
+        self.assertIn("core.IS_KILIDI.al(bekle=False)", k)
+        self.assertIn("core.yazilabilir_mi(self.conn)", k)
+        self.assertIn("core.IS_KILIDI.birak()", k)
+        self.assertEqual(src.count("IS_KILIDI.al("), 1, "kilit GUI'de yalniz _kuyruk_isle'den alinir")
+
+    def test_gui_is_kuyrugu_bosken_hemen_mesgulken_sirayla_calistirir(self):
+        import importlib.util
+        import os
+        import types
+        spec = importlib.util.spec_from_file_location("gui_kuyruk", HERE / "YT-Arsiv-GUI.pyw")
+        gui = importlib.util.module_from_spec(spec)
+        cwd = os.getcwd()
+        sys.path.insert(0, str(HERE))
+        try:
+            spec.loader.exec_module(gui)
+        finally:
+            sys.path.remove(str(HERE))
+            os.chdir(cwd)
+        yapilan, gunluk, durum = [], [], {"calisiyor": False}
+        sahte = types.SimpleNamespace(_kuyruk=[], log=gunluk.append, _is_calisiyor=lambda: durum["calisiyor"],
+                                      _kuyruk_goster=lambda: None)
+        gui.App._sirala(sahte, "a", lambda: yapilan.append("a"))
+        self.assertEqual((yapilan, sahte._kuyruk), (["a"], []), "is yokken hemen calisir")
+        durum["calisiyor"] = True
+        gui.App._sirala(sahte, "b", lambda: yapilan.append("b"))
+        gui.App._sirala(sahte, "c", lambda: yapilan.append("c"))
+        self.assertEqual(yapilan, ["a"], "is surerken calismaz, siraya girer")
+        self.assertEqual([ad for ad, _ in sahte._kuyruk], ["b", "c"])
+        durum["calisiyor"] = False
+        gui.App._sirala(sahte, "d", lambda: yapilan.append("d"))
+        self.assertEqual(yapilan, ["a"], "sirada bekleyen varken yeni is one gecmez")
+        while sahte._kuyruk:
+            gui.App._kuyruk_calistir(sahte)
+        self.assertEqual(yapilan, ["a", "b", "c", "d"], "eklendigi sirayla")
+        sahte._kuyruk.append(("bozuk", lambda: 1 / 0))
+        gui.App._kuyruk_calistir(sahte)                                  # hata siradakini durdurmaz, gunluge yazilir
+        self.assertEqual(sahte._kuyruk, [])
+        self.assertTrue(any("basarisiz" in s and "bozuk" in s for s in gunluk), gunluk)
 
     def test_gui_ilerleme_ve_gunluk_dosyasi_tek_kapidan(self):
         src = (HERE / "YT-Arsiv-GUI.pyw").read_text(encoding="utf-8")
         self.assertEqual(src.count("self.progress.start("), 1, "ilerleme cubugu yalniz _ilerleme'den surulur")
-        self.assertEqual(src.count("self.progress.stop("), 1)
+        self.assertEqual(src.count("self.progress.stop("), 2, "_ilerleme + _ilerleme_guncelle (belirsiz -> yuzdeli kip gecisi)")
         govde = re.search(r"    def _gunluge_yaz\(self.*?(?=\n    def )", src, re.S).group(0)
         self.assertIn("open(GUNLUK_KLASORU", govde)
         self.assertEqual(src.count("open(GUNLUK_KLASORU"), 1, "gunluk dosyasi yalniz _gunluge_yaz'dan acilir")

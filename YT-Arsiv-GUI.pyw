@@ -20,6 +20,8 @@ if os.name == "nt":                          # yuksek DPI ekranda bulanik/tasmis
     try:
         import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        # Gorev cubugunda 'python' / tuy yerine KENDI simgemiz ve gruplamasi icin uygulama kimligi
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ioz.YT-Arsiv")
     except Exception:
         pass
 
@@ -74,10 +76,25 @@ RENK = {
 }
 
 
+def _simge_yolu():
+    """Pencere simgesi (.ico): exe icinde gomulu (PyInstaller) ya da kaynak klasorundeki ikon\\ klasorunde."""
+    for kok in (Path(getattr(sys, "_MEIPASS", SCRIPT_DIR)), SCRIPT_DIR):
+        yol = kok / "ikon" / "yt-arsiv.ico"
+        if yol.is_file():
+            return yol
+    return None
+
+
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("YT-Arsiv")
+        try:
+            yol = _simge_yolu()
+            if yol:
+                self.root.iconbitmap(default=str(yol))      # tum pencereler (Ayarlar vb.) ayni simgeyi kullanir
+        except tk.TclError:
+            pass                                            # simge yuklenemese de uygulama acilir
         # Olcek: 96 DPI = 1.0.  Piksel verilen her olcu (pencere, sutun genisligi, satir yuksekligi) bununla carpilir.
         self._olcek = max(1.0, self.root.winfo_fpixels("1i") / 96.0)
         self.root.geometry(f"{self._px(1180)}x{self._px(740)}")
@@ -89,6 +106,9 @@ class App:
         self.cancel_flag = threading.Event()
         self._gunluk_dosyasi = None
         self._zebra_bekleyen: set = set()
+        self._kuyruk: list = []                  # sirada bekleyen isler: [(ad, fonksiyon)]  (bkz. _sirala)
+        self._indirme = None                     # son ilerleme bildirimi (isci yazar, arayuz _ilerleme_guncelle'de okur)
+        self._asama = ""                         # tarama asamasi metni ('Taraniyor...', 'Indiriliyor...' ...)
         self._siralama: dict = {}
 
         # Manuel koleksiyon sekmeleri (dinamik): playlist_id -> (frame, treeview, index_dict)
@@ -108,6 +128,8 @@ class App:
             self.log_queue.put(f"[!] Dosya tarama başarısız: {e}")
         self._refresh_all()
         self._poll_log_queue()
+        self._kuyruk_isle()
+        self._ilerleme_guncelle()
 
     # ---------------- UI ----------------
 
@@ -136,6 +158,7 @@ class App:
         style.configure("TMenubutton", padding=(self._px(8), self._px(3)))
         style.configure("Durum.TLabel", padding=(self._px(8), self._px(3)))
         style.configure("Soluk.TLabel", foreground=RENK["soluk"])
+        style.configure("Uyari.TLabel", foreground=RENK["uyari"], font=("Segoe UI", 10, "bold"))
         style.configure("BosDurum.TLabel", foreground=RENK["soluk"], font=("Segoe UI", 12), justify="center")
 
     def _menu_kur(self):
@@ -244,8 +267,17 @@ class App:
         ttk.Separator(durum, orient="horizontal").pack(side="top", fill="x")
         self.cancel_btn = ttk.Button(durum, text="İptal", command=self.on_cancel, state="disabled")
         self.cancel_btn.pack(side="right", padx=(2, self._px(8)), pady=self._px(3))
-        self.progress = ttk.Progressbar(durum, mode="determinate", length=self._px(160))
+        # sagdan sola: [Iptal] [genel cubuk] %genel  |  [sarki cubugu] sarki %   (indirme yokken ikisi de bos)
+        self.progress = ttk.Progressbar(durum, mode="determinate", length=self._px(200), maximum=100)
         self.progress.pack(side="right", padx=self._px(6))
+        self.yuzde_var = tk.StringVar(value="")
+        ttk.Label(durum, textvariable=self.yuzde_var, width=9, anchor="e", font=("Segoe UI", 10, "bold")).pack(side="right")
+        self.sarki_progress = ttk.Progressbar(durum, mode="determinate", length=self._px(110), maximum=100)
+        self.sarki_progress.pack(side="right", padx=self._px(6))
+        self.sarki_var = tk.StringVar(value="")
+        ttk.Label(durum, textvariable=self.sarki_var, width=11, anchor="e").pack(side="right")
+        self.kuyruk_var = tk.StringVar(value="")
+        ttk.Label(durum, textvariable=self.kuyruk_var, style="Uyari.TLabel").pack(side="right", padx=self._px(6))
         self.ozet_var = tk.StringVar(value="")
         ttk.Label(durum, textvariable=self.ozet_var, style="Soluk.TLabel", anchor="e").pack(side="right", padx=self._px(10))
         self.status_var = tk.StringVar(value="Hazır.")
@@ -337,22 +369,101 @@ class App:
         return bool(self.worker and self.worker.is_alive())
 
     def _mesgul(self) -> bool:
-        """KAPI: arka planda is (tarama/indirme/analiz) surerken veritabanini ya da dosyalari DEGISTIREN bir eylem baslatilmaz
-        (iki yazar cakismasin, taranan kayit ortadan kalkmasin).  Mesgulse kullaniciya soyler ve True doner."""
+        """KAPI: SIRAYA ALINAMAYAN isler (playlist silme, depo ekleme/kaldirma) arka planda is surerken baslatilmaz: taranan
+        liste / kullanilan depo ortadan kalkmasin.  Mesgulse kullaniciya soyler ve True doner.  Video silme, onay ve ekleme
+        ise engellenmez: bkz. _sirala."""
         if self._is_calisiyor():
             messagebox.showinfo("YT-Arsiv", "Arka planda bir iş sürüyor (tarama / indirme / analiz).\n\n"
-                                            "Bu işlem için önce onun bitmesini bekleyin ya da İptal'e basın.")
+                                            "Bu işlem sıraya alınamıyor; önce işin bitmesini bekleyin ya da İptal'e basın.")
             return True
         return False
 
+    def _kilitli(self, is_fn):
+        """Arka plan iscisini core.IS_KILIDI ile sarar: is boyunca kilit iscide; yalniz dosya inerken / indirmeler arasinda
+        beklerken cekirdek ara verir ve sirada bekleyen isler calisir."""
+        def sarili():
+            with core.IS_KILIDI.tut():
+                is_fn()
+        return sarili
+
+    def _sirala(self, ad: str, is_fn):
+        """KAPI: arsivi degistiren KISA isler (video silme, silinme onayi, liste ekleme).  Arka planda is yoksa HEMEN calisir;
+        varsa SIRAYA alinir ve tarama bir dosyayi indirirken ya da indirmeler arasinda beklerken (kilit ara verdiginde),
+        en gec is bitince, eklendigi sirayla calistirilir.  Boylece 1000 dosya inerken silme icin beklenmez, isler de cakismaz."""
+        if not self._is_calisiyor() and not self._kuyruk:
+            is_fn()
+            return
+        self._kuyruk.append((ad, is_fn))
+        self.log(f"[sirada] {ad}  -  arka plandaki is uygun oldugunda (bir dosya inerken) yapilacak")
+        self._kuyruk_goster()
+
+    def _kuyruk_goster(self):
+        self.kuyruk_var.set(f"Sırada: {len(self._kuyruk)} iş" if self._kuyruk else "")
+
+    def _kuyruk_calistir(self):
+        ad, is_fn = self._kuyruk.pop(0)
+        try:
+            is_fn()
+            self.log(f"[sirada] yapildi: {ad}")
+        except Exception as e:
+            self.log(f"[!] siradaki is basarisiz: {ad}: {e}\n{traceback.format_exc()}")
+        self._kuyruk_goster()
+
+    def _kuyruk_isle(self):
+        """Sirada bekleyen isleri yoklar (0.4 sn'de bir, arayuz is parcaciginda).  Isci yoksa hemen; varsa yalniz kilit
+        alinabiliyorsa (isci ara vermis) ve veritabani yazilabiliyorsa BIR is calistirir."""
+        try:
+            if self._kuyruk:
+                if not self._is_calisiyor():
+                    self._kuyruk_calistir()
+                elif core.IS_KILIDI.al(bekle=False):
+                    try:
+                        if core.yazilabilir_mi(self.conn):
+                            self._kuyruk_calistir()
+                    finally:
+                        core.IS_KILIDI.birak()
+        finally:
+            self.root.after(400, self._kuyruk_isle)
+
     def _ilerleme(self, calisiyor: bool):
-        """Ilerleme cubugunun TEK kapisi: is surerken hareketli, bostayken bos."""
+        """Ilerleme cubugunun TEK kapisi: is surerken hareketli (indirme baslayinca yuzdeli), bostayken bos."""
+        self._indirme = None
+        self._asama = ""
         if calisiyor:
             self.progress.configure(mode="indeterminate")
             self.progress.start(80)
         else:
             self.progress.stop()
             self.progress.configure(mode="determinate", value=0)
+            self.yuzde_var.set("")
+            self.sarki_progress.configure(value=0)
+            self.sarki_var.set("")
+
+    def _ilerleme_bildirimi(self, bilgi: dict):
+        """core.ilerleme_dinle dinleyicisi: ISCI is parcaciginda cagrilir; widget'a dokunmaz, yalniz degeri saklar."""
+        self._indirme = bilgi
+
+    def _ilerleme_guncelle(self):
+        """Arayuz is parcaciginda 0.3 sn'de bir: indirme ilerlemesini cubuga ve durum metnine yansitir.
+        Cubuk GENEL ilerlemeyi (biten / toplam) gosterir; metinde o an inen SARKININ yuzdesi de yazar."""
+        try:
+            b = self._indirme
+            if b and b.get("toplam") and self._is_calisiyor():
+                toplam, biten = b["toplam"], b["biten"]
+                if str(self.progress.cget("mode")) != "determinate":
+                    self.progress.stop()
+                    self.progress.configure(mode="determinate")
+                genel = 100.0 * (biten + (b["video_yuzde"] or 0) / 100.0) / toplam
+                self.progress.configure(value=min(100.0, genel))
+                self.yuzde_var.set(f"genel %{genel:.0f}")
+                self.ozet_var.set("")                        # indirme boyunca baslik icin yer ac (bitince _refresh_all geri getirir)
+                vy = b.get("video_yuzde")
+                self.sarki_progress.configure(value=vy or 0)
+                self.sarki_var.set(f"şarkı %{vy:.0f}" if vy is not None else "")
+                baslik = (b.get("baslik") or "")[:60]
+                self.status_var.set(f"İndiriliyor: {biten}/{toplam} bitti" + (f"   -   {baslik}" if baslik else ""))
+        finally:
+            self.root.after(300, self._ilerleme_guncelle)
 
     def _is_basladi(self, durum: str, iptal_edilebilir: bool = True):
         self.cancel_flag.clear()
@@ -372,7 +483,7 @@ class App:
     def on_hakkinda(self):
         messagebox.showinfo(
             "YT-Arsiv hakkında",
-            "YT-Arsiv - YouTube oynatma listesi ve kanal arşivleyici\n\n"
+            f"YT-Arsiv {core.SURUM} - YouTube oynatma listesi ve kanal arşivleyici\n\n"
             "Listelerinizi ve kanallarınızı diske indirir; listeden çıkan ve YouTube'dan kalkan videoları "
             "ayrı klasörlerde saklar.\n\n"
             f"Veritabanı: {core.DB_PATH}\nArşiv klasörü: {core.DOWNLOADS}\n\n{PROJE_SAYFASI}")
@@ -383,6 +494,10 @@ class App:
 
     def on_close(self):
         """Pencere kapatma: is surerken sormadan kapanmaz (yarim indirme / yarim tasima birakmamak icin)."""
+        if self._kuyruk and not messagebox.askyesno(
+                "YT-Arsiv", f"Sırada bekleyen {len(self._kuyruk)} iş var (silme / onay / ekleme).\n\n"
+                            "Şimdi kapatırsanız bunlar YAPILMAZ.\n\nYine de kapatılsın mı?", icon="warning", default="no"):
+            return
         if self._is_calisiyor():
             if not messagebox.askyesno(
                     "YT-Arsiv", "Arka planda bir iş sürüyor (tarama / indirme).\n\n"
@@ -690,7 +805,7 @@ class App:
                 conn.close()
                 self.root.after(0, self._on_una_kontrol_done)
 
-        self.worker = threading.Thread(target=worker, daemon=True)
+        self.worker = threading.Thread(target=self._kilitli(worker), daemon=True)
         self.worker.start()
 
     def _on_una_kontrol_done(self):
@@ -768,7 +883,7 @@ class App:
         """Secilileri diskten ve DB'den kaldirir (core.kopya_kaldir - tek kapi).  Tek kopya olanlar icin
         ayrica uyarir: YouTube'dan da kalktigi icin bir daha indirilemez."""
         rows = self._selected_una_rows()
-        if not rows or self._mesgul():
+        if not rows:
             return
         secili = {(r["video_id"], r["playlist_id"]) for r in rows}
         cift = [r for r in rows if r["es"] and (r["es"]["video_id"], r["es"]["playlist_id"]) in secili]
@@ -805,17 +920,20 @@ class App:
                 f"(~{mb:.0f} MB).\nBu playlist'ler bu videoları bir daha almayacak.\n{uyarilar}\n{onizleme}\n\nDevam edilsin mi?",
                 icon="warning", default="no"):
             return
-        n_ok = n_fail = 0
-        for r in rows:
-            ok, msg = core.kopya_kaldir(self.conn, r["video_id"], r["playlist_id"])
-            if ok:
-                n_ok += 1
-            else:
-                n_fail += 1
-                self.log(f"  [!] Kaldırılamadı: {r['title'] or r['video_id']} ({msg})")
-        self.log(f"[YAYINDAN KALKAN SİL] {n_ok} video kaldırıldı (~{mb:.0f} MB)"
-                 + (f", {n_fail} kaldırılamadı" if n_fail else ""))
-        self._refresh_all()
+        def calistir():
+            n_ok = n_fail = 0
+            for r in rows:
+                ok, msg = core.kopya_kaldir(self.conn, r["video_id"], r["playlist_id"])
+                if ok:
+                    n_ok += 1
+                else:
+                    n_fail += 1
+                    self.log(f"  [!] Kaldırılamadı: {r['title'] or r['video_id']} ({msg})")
+            self.log(f"[YAYINDAN KALKAN SİL] {n_ok} video kaldırıldı (~{mb:.0f} MB)"
+                     + (f", {n_fail} kaldırılamadı" if n_fail else ""))
+            self._refresh_all()
+
+        self._sirala(f"Yayından kalkan {len(rows)} videoyu sil", calistir)
 
     def _build_tab_duplicates(self):
         f = ttk.Frame(self.nb)
@@ -1277,7 +1395,7 @@ class App:
                 self.root.after(0, lambda: self._tarama_bitti("Manuel klasör taraması bitti."))
 
         self._is_basladi("Manuel klasörler taranıyor...", iptal_edilebilir=False)
-        self.worker = threading.Thread(target=worker, daemon=True)
+        self.worker = threading.Thread(target=self._kilitli(worker), daemon=True)
         self.worker.start()
 
     def _tarama_bitti(self, durum: str):
@@ -1521,7 +1639,7 @@ class App:
                 conn.close()
                 self.root.after(0, self._on_ses_done)
 
-        self.worker = threading.Thread(target=worker, daemon=True)
+        self.worker = threading.Thread(target=self._kilitli(worker), daemon=True)
         self.worker.start()
 
     def on_dup_ses_kutuphane(self):
@@ -1558,7 +1676,7 @@ class App:
                 conn.close()
                 self.root.after(0, self._on_ses_done)
 
-        self.worker = threading.Thread(target=worker, daemon=True)
+        self.worker = threading.Thread(target=self._kilitli(worker), daemon=True)
         self.worker.start()
 
     def _on_ses_done(self):
@@ -1638,8 +1756,6 @@ class App:
         if not sel:
             messagebox.showinfo("YT-Arsiv", "Önce en az bir kayıt seç (gerekirse Ctrl/Shift ile çoklu).")
             return
-        if self._mesgul():
-            return
         rows = []    # {vid, pid, label, var}
         files = []   # {file, label}
         for iid in sel:
@@ -1683,29 +1799,32 @@ class App:
         if not ans:
             return
 
-        n_rows = n_fail = n_files = 0
-        for r in rows:
-            ok, msg = core.kopya_kaldir(self.conn, r["vid"], r["pid"])
-            if ok:
-                n_rows += 1
-            else:
-                n_fail += 1
-                self.log(f"  [!] Kaldırılamadı: {r['label']} ({msg})")
-        for t in files:
-            p = t["file"]
-            if not p.exists():
-                continue            # dosya zaten yok: hata degil
-            stem, parent = p.stem, p.parent
-            for sf in list(parent.iterdir()):
-                if sf.is_file() and (sf.stem == stem or sf.name.startswith(stem + ".")):
-                    try:
-                        sf.unlink()
-                        n_files += 1
-                    except OSError as e:
-                        self.log(f"  [!] Silinemedi: {sf} ({e})")
-        self.log(f"[TOPLU SİL] {n_rows} kayıt kaldırıldı, {n_files} DB dışı dosya silindi"
-                 + (f", {n_fail} kayıt kaldırılamadı" if n_fail else ""))
-        self._refresh_all()
+        def calistir():
+            n_rows = n_fail = n_files = 0
+            for r in rows:
+                ok, msg = core.kopya_kaldir(self.conn, r["vid"], r["pid"])
+                if ok:
+                    n_rows += 1
+                else:
+                    n_fail += 1
+                    self.log(f"  [!] Kaldırılamadı: {r['label']} ({msg})")
+            for t in files:
+                p = t["file"]
+                if not p.exists():
+                    continue            # dosya zaten yok: hata degil
+                stem, parent = p.stem, p.parent
+                for sf in list(parent.iterdir()):
+                    if sf.is_file() and (sf.stem == stem or sf.name.startswith(stem + ".")):
+                        try:
+                            sf.unlink()
+                            n_files += 1
+                        except OSError as e:
+                            self.log(f"  [!] Silinemedi: {sf} ({e})")
+            self.log(f"[TOPLU SİL] {n_rows} kayıt kaldırıldı, {n_files} DB dışı dosya silindi"
+                     + (f", {n_fail} kayıt kaldırılamadı" if n_fail else ""))
+            self._refresh_all()
+
+        self._sirala(f"Aynı videolardan {len(rows)} kayıt + {len(files)} dosya sil", calistir)
 
     def on_dup_copy_title(self):
         iid = self._selected_dup_iid()
@@ -1801,8 +1920,6 @@ class App:
     # ---------------- Actions ----------------
 
     def on_add(self):
-        if self._mesgul():
-            return
         url = simpledialog.askstring(
             "Playlist / Kanal Ekle",
             "YouTube playlist veya kanal URL'i:\n(örnek: .../playlist?list=...  ya da  https://www.youtube.com/@kanaladi)",
@@ -1837,14 +1954,19 @@ class App:
         )
         if alias is None:                    # takma ad penceresinde Iptal: ekleme de iptal (bos birakip Tamam = adsiz ekle)
             return
-        pid, err = core.add_playlist(self.conn, url, alias.strip())
-        if err:
-            messagebox.showwarning("YT-Arsiv", err)
-            return
-        self.log(f"{'Kanal' if kanal else 'Playlist'} eklendi [id={pid}]: {url}")
-        self._refresh_playlists()
-        if messagebox.askyesno("YT-Arsiv", "Şimdi taransın (videolar indirilsin) mi?"):
-            self._start_sync(pid)
+        def calistir():
+            pid, err = core.add_playlist(self.conn, url, alias.strip())
+            if err:
+                messagebox.showwarning("YT-Arsiv", err)
+                return
+            self.log(f"{'Kanal' if kanal else 'Playlist'} eklendi [id={pid}]: {url}")
+            self._refresh_playlists()
+            if self._is_calisiyor():
+                self.log("  Yeni liste, süren tarama bitince 'Seçiliyi Tara' ya da 'Tümünü Tara' ile indirilir.")
+            elif messagebox.askyesno("YT-Arsiv", "Şimdi taransın (videolar indirilsin) mi?"):
+                self._start_sync(pid)
+
+        self._sirala(f"{'Kanal' if kanal else 'Playlist'} ekle: {url}", calistir)
 
     def on_delete_playlist(self):
         pid = self._selected_playlist_id()
@@ -1976,7 +2098,7 @@ class App:
                 self.root.after(0, lambda: self._tarama_bitti("Klasör taraması bitti."))
 
         self._is_basladi("Tüm klasörler taranıyor...", iptal_edilebilir=False)
-        self.worker = threading.Thread(target=worker, daemon=True)
+        self.worker = threading.Thread(target=self._kilitli(worker), daemon=True)
         self.worker.start()
 
     def _selected_lost_rows(self) -> list:
@@ -2009,8 +2131,6 @@ class App:
         if not rows:
             messagebox.showinfo("YT-Arsiv", "Önce bir veya daha fazla video seç.")
             return
-        if self._mesgul():
-            return
         hedefler = self._lost_hedefleri(rows)
         if not messagebox.askyesno(
             "Sadece Kaydı Sil",
@@ -2019,19 +2139,22 @@ class App:
             icon="warning",
         ):
             return
-        silinen = hata = 0
-        for r, k in hedefler:
-            try:
-                ok, msg = core.permanently_delete_video(self.conn, r["video_id"], k["playlist_id"], delete_file=False)
-            except Exception as e:
-                ok, msg = False, f"hata: {e}"
-            silinen += bool(ok)
-            hata += not ok
-            if not ok:
-                self.log(f"  [!] {(r.get('title') or '')[:50]} [{k.get('playlist_alias') or '?'}]: {msg}")
-        self.log(f"[KAYIT SİL] {len(rows)} video: {silinen} DB kaydı silindi, dosyalar korundu"
-                 + (f", {hata} hata" if hata else ""))
-        self._refresh_all()
+        def calistir():
+            silinen = hata = 0
+            for r, k in hedefler:
+                try:
+                    ok, msg = core.permanently_delete_video(self.conn, r["video_id"], k["playlist_id"], delete_file=False)
+                except Exception as e:
+                    ok, msg = False, f"hata: {e}"
+                silinen += bool(ok)
+                hata += not ok
+                if not ok:
+                    self.log(f"  [!] {(r.get('title') or '')[:50]} [{k.get('playlist_alias') or '?'}]: {msg}")
+            self.log(f"[KAYIT SİL] {len(rows)} video: {silinen} DB kaydı silindi, dosyalar korundu"
+                     + (f", {hata} hata" if hata else ""))
+            self._refresh_all()
+
+        self._sirala(f"Liste dışı {len(rows)} videonun kaydını sil", calistir)
 
     def on_delete_lost_permanent(self):
         """Secili kayip videolari DB'den ve diskten siler (core.kopya_kaldir - TEK KAPI: baska kayitla paylasilan
@@ -2039,8 +2162,6 @@ class App:
         rows = self._selected_lost_rows()
         if not rows:
             messagebox.showinfo("YT-Arsiv", "Önce bir veya daha fazla video seç.")
-            return
-        if self._mesgul():
             return
         hedefler = self._lost_hedefleri(rows)
         if not messagebox.askyesno(
@@ -2051,17 +2172,20 @@ class App:
             icon="warning",
         ):
             return
-        silinen = hata = 0
-        for r, k in hedefler:
-            try:
-                ok, msg = core.kopya_kaldir(self.conn, r["video_id"], k["playlist_id"])
-            except Exception as e:
-                ok, msg = False, f"hata: {e}"
-            silinen += bool(ok)
-            hata += not ok
-            self.log(f"  [{k.get('playlist_alias') or '?'}] {(r.get('title') or '')[:50]}: {msg}")
-        self.log(f"[KALICI SİL] {len(rows)} video: {silinen} kayıt silindi" + (f", {hata} hata" if hata else ""))
-        self._refresh_all()
+        def calistir():
+            silinen = hata = 0
+            for r, k in hedefler:
+                try:
+                    ok, msg = core.kopya_kaldir(self.conn, r["video_id"], k["playlist_id"])
+                except Exception as e:
+                    ok, msg = False, f"hata: {e}"
+                silinen += bool(ok)
+                hata += not ok
+                self.log(f"  [{k.get('playlist_alias') or '?'}] {(r.get('title') or '')[:50]}: {msg}")
+            self.log(f"[KALICI SİL] {len(rows)} video: {silinen} kayıt silindi" + (f", {hata} hata" if hata else ""))
+            self._refresh_all()
+
+        self._sirala(f"Liste dışı {len(rows)} videoyu kaydı ve dosyasıyla sil", calistir)
 
     def _open_playlist_subdir(self, pid: int, subdir: str | None):
         r = self.conn.execute("SELECT alias, title FROM playlists WHERE id=?", (pid,)).fetchone()
@@ -2129,6 +2253,7 @@ class App:
 
         self._is_basladi("Taranıyor...")
         self._son_ozet = None
+        core.ilerleme_dinle(self._ilerleme_bildirimi)             # indirme baslayinca cubuk yuzdeli olur
 
         def worker():
             # Worker thread'inde ayri DB baglantisi sart
@@ -2139,7 +2264,7 @@ class App:
                     playlist_id=playlist_id,
                     log=self._enqueue_log,
                     should_cancel=self.cancel_flag.is_set,
-                    on_phase=lambda t: self.root.after(0, lambda: self.status_var.set(t)),
+                    on_phase=lambda t: self.root.after(0, lambda: None if self._indirme else self.status_var.set(t)),
                 )
                 self._enqueue_log(
                     f"\n=== ÖZET ===\n"
@@ -2164,10 +2289,11 @@ class App:
                 conn.close()
                 self.root.after(0, self._on_sync_done)
 
-        self.worker = threading.Thread(target=worker, daemon=True)
+        self.worker = threading.Thread(target=self._kilitli(worker), daemon=True)
         self.worker.start()
 
     def _on_sync_done(self):
+        core.ilerleme_dinle(None)
         ozet = getattr(self, "_son_ozet", None) or {}
         if ozet.get("beklenmeyen_hata"):
             durum = "Tarama HATA ile durdu - ayrıntı günlükte."
@@ -2245,17 +2371,19 @@ class App:
             if not anahtarlar:
                 messagebox.showinfo("YT-Arsiv", "Önce video seç.", parent=win)
                 return
-            if self._mesgul():
-                return
             if onay and not messagebox.askyesno("YT-Arsiv", onay.format(n=len(anahtarlar)), icon="warning", default="no", parent=win):
                 return
-            n = islem(anahtarlar)
-            for pid, vid in anahtarlar:
+            for pid, vid in anahtarlar:                       # karar verildi: pencereden hemen duser, is sirayla yapilir
                 if tv.exists(f"{pid}|{vid}"):
                     tv.delete(f"{pid}|{vid}")
-            self.log(f"{mesaj}: {n} video")
             durum.set(f"{len(tv.get_children())} video onay bekliyor.")
-            self._refresh_all()
+
+            def calistir():
+                n = islem(anahtarlar)
+                self.log(f"{mesaj}: {n} video")
+                self._refresh_all()
+
+            self._sirala(f"Silinme onayı: {mesaj.lower()} ({len(anahtarlar)} video)", calistir)
             if not tv.get_children():
                 win.destroy()
 
@@ -2370,6 +2498,7 @@ class App:
         ic.pack(fill="both", expand=True)
         var, yok = "var", "YOK"
         satirlar = [
+            ("Sürüm", b["surum"]),
             ("Uygulama klasörü", b["uygulama"]),
             ("Arşiv (indirme) klasörü", b["arsiv"]),
             ("Veritabanı", b["veritabani"]),

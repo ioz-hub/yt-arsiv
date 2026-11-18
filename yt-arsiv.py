@@ -25,6 +25,7 @@ from ytarsiv_core import (
     indirme_ayarlari,
     indirme_ayarlari_yaz,
     ortam_bilgisi,
+    SURUM,
     kanal_url_duzenle,
     manuel_tarama,
     tum_klasorleri_tara,
@@ -169,6 +170,7 @@ def cmd_ayar(args, conn):
     print(f"Uzun video kalite siniri : {ay['uzun_dk']} dk'dan uzun videolar en fazla "
           + ("sinirsiz (en iyi kalite)" if not ay["uzun_p"] else f"{ay['uzun_p']}p"))
     b = ortam_bilgisi()
+    print(f"Surum                    : {b['surum']}")
     print(f"Arsiv klasoru            : {b['arsiv']}")
     print(f"Veritabani               : {b['veritabani']}")
     print(f"Ayar dosyasi             : {b['ayar_dosyasi']}" + ("   [BOZUK]" if b["ayar_dosyasi_bozuk"] else ""))
@@ -219,6 +221,7 @@ def cmd_history(args, conn):
 
 def main():
     parser = argparse.ArgumentParser(description="YT-Arsiv CLI")
+    parser.add_argument("--version", action="version", version=f"YT-Arsiv {SURUM}")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("add", help="Yeni playlist veya kanal ekle (URL: playlist ya da https://www.youtube.com/@kanal)")

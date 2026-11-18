@@ -6,6 +6,7 @@ from datetime import datetime as _datetime
 from pathlib import Path
 import os as _os_yol
 import sys as _sys_yol
+SURUM = "1.1.0"                    # uygulama surumu: TEK tanim (GUI / CLI / yayin etiketi bununla ayni olmali)
 # Donmus (PyInstaller exe) surumde veri/arac/cekirdek dosyalari exe'nin yaninda durur; kaynaktan calismada bu dosyanin yaninda.
 UYGULAMA_DIZINI = (Path(_sys_yol.executable).resolve().parent if getattr(_sys_yol, "frozen", False)
                    else Path(__file__).resolve().parent)
@@ -270,6 +271,10 @@ try:
         _with_cookies = False
         FORMAT_ZORLA = None     # yarim indirmeyi surdururken mevcut parcalarin format kimliklerini zorlar
 
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.add_progress_hook(_ilerleme_kancasi)      # TEK ilerleme kapisi (dinleyen yoksa hicbir sey yapmaz)
+
         def extract_info(self, url, *args, **kwargs):
             # Cerez yalniz YouTube bot kontrolu isterse devreye girer; bozuk cerez normal calismayi engellemez.
             try:
@@ -309,29 +314,170 @@ _download_video_orig = _cached.download_video
 _last_download_end = None
 
 
+# ---------------------------------------------------------------------------
+# KAPI: IS KILIDI.  Arsivi DEGISTIREN isler (tarama/indirme, klasor taramasi, analiz, GUI'den silme...) ayni anda calismaz;
+# ama indirme saatlerce surebilir.  Kural: uzun is kilidi TUTAR, yalniz dosyanin inmesi + indirmeler arasi bekleme sirasinda
+# ARA VERIR (download_video); o aralikta sirada bekleyen kisa isler (GUI'den silme, onay...) kilidi alip calisir, indirme biten
+# is kilidi geri alana kadar bekler.  Boylece isler ust uste binmez, kullanici da indirmenin bitmesini beklemez.
+#   IS_KILIDI.al / birak / bende     kilidi al (bekle=False: alamazsa False), birak, 'bu is parcacigi tutuyor mu'
+#   IS_KILIDI.tut()                   with blogu: is boyunca tut
+#   IS_KILIDI.ara_ver()               with blogu: tutan is parcacigi gecici birakir (tutmuyorsa hicbir sey yapmaz: CLI etkilenmez)
+#   yazilabilir_mi(conn)              baska baglanti yazma islemi ortasinda mi? (kisa yoklama; sirada bekleyen is baslamadan once)
+# ---------------------------------------------------------------------------
+import contextlib as _contextlib
+import threading as _thr_kilit
+
+
+class _IsKilidi:
+    def __init__(self):
+        self._kilit = _thr_kilit.Lock()
+        self._sahip = None
+
+    def al(self, bekle=True):
+        if not self._kilit.acquire(blocking=bekle):
+            return False
+        self._sahip = _thr_kilit.get_ident()
+        return True
+
+    def birak(self):
+        self._sahip = None
+        self._kilit.release()
+
+    def bende(self):
+        return self._sahip == _thr_kilit.get_ident()
+
+    @_contextlib.contextmanager
+    def tut(self):
+        self.al()
+        try:
+            yield
+        finally:
+            self.birak()
+
+    @_contextlib.contextmanager
+    def ara_ver(self):
+        if not self.bende():
+            yield
+            return
+        self.birak()
+        try:
+            yield
+        finally:
+            self.al()
+
+
+IS_KILIDI = _IsKilidi()
+_IS_BAG = _thr_kilit.local()          # bu is parcaciginda suren taramanin veritabani baglantisi (bkz. sync_two_phase, download_video)
+
+
+# ---------------------------------------------------------------------------
+# KAPI: INDIRME ILERLEMESI.  Hem SURMEKTE OLAN VIDEONUN yuzdesi (yt-dlp ilerleme kancasi) hem GENEL ilerleme (biten / toplam
+# indirme) tek yerden bildirilir.  ilerleme_dinle(fn) ile dinleyici baglanir (GUI); dinleyen yoksa hicbir sey yapilmaz (CLI).
+# Dinleyiciye giden sozluk: {'toplam', 'biten', 'video_yuzde' (0-100 | None), 'baslik'}.  Dinleyici ISCI is parcaciginda cagrilir.
+# ---------------------------------------------------------------------------
+_ILERLEME = {"dinleyici": None, "toplam": 0, "biten": 0, "son": 0.0, "son_yuzde": -1}
+
+
+def ilerleme_dinle(fn):
+    """Ilerleme dinleyicisini baglar (None: kaldirir) ve sayaclari sifirlar."""
+    _ILERLEME.update(dinleyici=fn, toplam=0, biten=0, son=0.0, son_yuzde=-1)
+
+
+def _ilerleme_bildir(video_yuzde=None, baslik=None):
+    fn = _ILERLEME["dinleyici"]
+    if fn is None:
+        return
+    try:
+        fn({"toplam": _ILERLEME["toplam"], "biten": min(_ILERLEME["biten"], _ILERLEME["toplam"] or _ILERLEME["biten"]),
+            "video_yuzde": video_yuzde, "baslik": baslik})
+    except Exception:
+        pass                               # dinleyici hatasi indirmeyi durdurmaz
+
+
+def _ilerleme_bitti():
+    """Bir indirme denemesi bitti (indi / atlandi / hata): genel sayaci ilerletir."""
+    _ILERLEME["biten"] += 1
+    _ILERLEME["son_yuzde"] = -1
+    _ilerleme_bildir()
+
+
+def _video_yuzdesi(d):
+    """yt-dlp ilerleme sozlugunden VIDEONUN TAMAMI icin yuzde.  Goruntu + ses ayri parcalar halinde iner: parca boyutlari
+    biliniyorsa bayt oraniyla, bilinmiyorsa parca sirasina gore hesaplanir (yuzde 0'dan 100'e TEK kez gider)."""
+    bilgi = d.get("info_dict") or {}
+    toplam = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+    inen = d.get("downloaded_bytes") or 0
+    oran = 1.0 if d.get("status") == "finished" else (min(1.0, inen / toplam) if toplam else 0.0)
+    parcalar = bilgi.get("requested_formats") or []
+    if len(parcalar) < 2:
+        return 100.0 * oran
+    sira = next((i for i, f in enumerate(parcalar) if f.get("format_id") == bilgi.get("format_id")), 0)
+    boyut = [f.get("filesize") or f.get("filesize_approx") for f in parcalar]
+    if all(boyut):
+        return 100.0 * (sum(boyut[:sira]) + oran * boyut[sira]) / sum(boyut)
+    return 100.0 * (sira + oran) / len(parcalar)
+
+
+def _ilerleme_kancasi(d):
+    if _ILERLEME["dinleyici"] is None or d.get("status") not in ("downloading", "finished"):
+        return
+    yuzde = _video_yuzdesi(d)
+    simdi = _time.monotonic()
+    if int(yuzde) == _ILERLEME["son_yuzde"] and simdi - _ILERLEME["son"] < 1.0:
+        return                             # sik bildirim arayuzu bogmasin: yuzde degisince ya da saniyede bir
+    _ILERLEME.update(son=simdi, son_yuzde=int(yuzde))
+    _ilerleme_bildir(video_yuzde=yuzde, baslik=(d.get("info_dict") or {}).get("title"))
+
+
+def yazilabilir_mi(conn, bekle_ms=250):
+    """Veritabani su an YAZILABILIR mi (baska bir baglanti yazma islemi ortasinda degil mi)?  Hicbir sey yazmaz.
+    Sirada bekleyen bir is (silme vb.) baslamadan once sorulur: 'database is locked' ile yarida kalmasin."""
+    import sqlite3 as _sq
+    try:
+        conn.execute(f"PRAGMA busy_timeout={int(bekle_ms)}")
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("ROLLBACK")
+        return True
+    except _sq.OperationalError as e:
+        return "within a transaction" in str(e)        # bu baglanti zaten yazma isleminde: yazabilir
+    finally:
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+        except _sq.Error:
+            pass
+
+
 def download_video(video_url, dest_dir, playlist_index=None):
     global _last_download_end
     if _yakinda_mi(video_url):             # planli premiyer: YouTube indirtmez; hata sayilmaz, yayinlaninca kendiliginden iner
         _yakinda_atla()
+        _ilerleme_bitti()
         return None
     hedef = depo_sec(dest_dir)            # TEK depo kapisi: yer yoksa ek depoya yonlendirir, hepsi doluysa indirmeyi atlar
     if hedef is None:
         _depo_doldu(dest_dir)
+        _ilerleme_bitti()
         return None
     if Path(hedef) != Path(dest_dir):
         _DEPO["yonlendirilen"] += 1
         dest_dir = hedef
-    if _last_download_end is not None:
-        wait = _random.uniform(*indirme_ayarlari()["bekleme"]) - (_time.monotonic() - _last_download_end)
-        if wait > 0:
-            _time.sleep(wait)
     try:
-        sonuc = _download_video_orig(video_url, dest_dir, playlist_index)
+        if IS_KILIDI.bende():             # ara vermeden once: taramanin bekleyen yazmalari kaydedilir, yoksa veritabani kilitli
+            bag = getattr(_IS_BAG, "conn", None)   # kalir ve sirada bekleyen is 'database is locked' alir
+            if bag is not None:
+                bag.commit()
+        with IS_KILIDI.ara_ver():         # bekleme + indirme suresince sirada bekleyen kisa isler (silme vb.) calisabilir
+            if _last_download_end is not None:
+                wait = _random.uniform(*indirme_ayarlari()["bekleme"]) - (_time.monotonic() - _last_download_end)
+                if wait > 0:
+                    _time.sleep(wait)
+            sonuc = _download_video_orig(video_url, dest_dir, playlist_index)
         if not sonuc and depo_dolu_mu(dest_dir):          # indirme yer bitince yarida kaldi
             _depo_doldu(dest_dir)
         return sonuc
     finally:
         _last_download_end = _time.monotonic()
+        _ilerleme_bitti()
 
 
 _cached.download_video = download_video
@@ -1335,7 +1481,7 @@ def ortam_bilgisi():
     except Exception:
         ytdlp = None
     return {
-        "uygulama": str(UYGULAMA_DIZINI), "veritabani": str(DB_PATH), "arsiv": str(_cached.DOWNLOADS), "ayar_dosyasi": str(CONFIG_FILE),
+        "surum": SURUM, "uygulama": str(UYGULAMA_DIZINI), "veritabani": str(DB_PATH), "arsiv": str(_cached.DOWNLOADS), "ayar_dosyasi": str(CONFIG_FILE),
         "ayar_dosyasi_bozuk": _ayar_bozuk(), "python": _platform.python_version(), "yt_dlp": ytdlp,
         "ffmpeg": _sh.which("ffmpeg"), "ses_araci": os.fspath(SES_ARACI) if SES_ARACI.is_file() else None,   # yalniz yol bilgisi (calistirmaz)
         "cerez": str(COOKIES_FILE) if COOKIES_FILE.is_file() else None, "cerez_yolu": str(COOKIES_FILE),
@@ -2100,6 +2246,8 @@ def sync_two_phase(conn, playlist_id=None, log=print, should_cancel=None, on_pha
         if pid is not None and pid not in pids:
             pids.append(pid)
     log(f"\n=== 3/3 INDIRME: {n_def} video, {len(pids)} playlist ===")
+    _ILERLEME.update(toplam=n_def, biten=0)                    # genel ilerleme: biten / toplam (bkz. _ilerleme_bitti)
+    _ilerleme_bildir()
     _DEPO.update(dolu=False, atlanan=0, yonlendirilen=0, yakinda=0, sessiz_log=0, sessiz_olay=0, log=log)
     try:
         with _DepoSusturma():
@@ -2631,7 +2779,11 @@ _sync_two_phase_ham = sync_two_phase
 
 def sync_two_phase(conn, playlist_id=None, log=print, should_cancel=None, on_phase=None):
     """Tarama kontrolorunun TEK kapisi: yerel isler -> tarama -> indirme -> 4) dosya eslestirme."""
-    summary = _sync_two_phase_ham(conn, playlist_id=playlist_id, log=log, should_cancel=should_cancel, on_phase=on_phase)
+    _IS_BAG.conn = conn                    # download_video ara vermeden once BU baglantinin bekleyen yazmalarini kaydeder
+    try:
+        summary = _sync_two_phase_ham(conn, playlist_id=playlist_id, log=log, should_cancel=should_cancel, on_phase=on_phase)
+    finally:
+        _IS_BAG.conn = None
     if should_cancel and should_cancel():
         return summary
     (on_phase or (lambda t: None))("Dosyalar eslestiriliyor...")
