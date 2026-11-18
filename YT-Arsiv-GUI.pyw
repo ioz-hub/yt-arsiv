@@ -85,6 +85,34 @@ def _simge_yolu():
     return None
 
 
+def _simgeyi_pencereye_ata(root, yol):
+    """Pencerenin BUYUK (gorev cubugu) ve KUCUK (baslik cubugu) simgesini .ico'dan EKRAN OLCEGINE UYGUN boyutta yukler.
+    Tk'nin iconbitmap'i yalniz 32/16 px verir; %125-150 olcekli ekranda gorev cubugu 40/48 px ister ve Windows 32 px'i buyutup
+    basamakli (8 bit gibi) gosterir.  LoadImage dosyadaki en yakin kareyi tam boyutla secer (ico'da 20/24/32/40/48/64 var).
+    Doner: yuklenen simge tutamaclari (uygulama omru boyunca tutulmali) ya da []."""
+    if os.name != "nt" or not yol:
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+        u = ctypes.windll.user32
+        u.LoadImageW.restype = ctypes.c_void_p
+        u.LoadImageW.argtypes = [wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT, ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        u.SendMessageW.restype = ctypes.c_void_p
+        u.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        hwnd = u.GetParent(root.winfo_id()) or root.winfo_id()
+        tutamaklar = []
+        for tur, (gen, yuk) in ((1, (u.GetSystemMetrics(11), u.GetSystemMetrics(12))),      # ICON_BIG   <- SM_CXICON/SM_CYICON
+                                (0, (u.GetSystemMetrics(49), u.GetSystemMetrics(50)))):     # ICON_SMALL <- SM_CXSMICON/SM_CYSMICON
+            h = u.LoadImageW(None, str(yol), 1, gen, yuk, 0x10)                             # IMAGE_ICON, LR_LOADFROMFILE
+            if h:
+                u.SendMessageW(hwnd, 0x0080, tur, h)                                        # WM_SETICON
+                tutamaklar.append(h)
+        return tutamaklar
+    except Exception:
+        return []                                                                           # simge atanamasa da uygulama acilir
+
+
 class App:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -107,6 +135,7 @@ class App:
         self._gunluk_dosyasi = None
         self._zebra_bekleyen: set = set()
         self._kuyruk: list = []                  # sirada bekleyen isler: [(ad, fonksiyon)]  (bkz. _sirala)
+        self._simge_tutamaklari: list = []       # WM_SETICON ile atanan simgeler (bkz. _simgeyi_pencereye_ata)
         self._indirme = None                     # son ilerleme bildirimi (isci yazar, arayuz _ilerleme_guncelle'de okur)
         self._asama = ""                         # tarama asamasi metni ('Taraniyor...', 'Indiriliyor...' ...)
         self._siralama: dict = {}
@@ -2674,7 +2703,7 @@ def main():
     root = tk.Tk()
     root.withdraw()                                  # hazirlik bitene kadar yarim cizilmis pencere gorunmesin
     try:
-        App(root)
+        app = App(root)
     except Exception as e:                           # konsolsuz exe'de sessizce kapanmasin: nedenini goster
         messagebox.showerror(
             "YT-Arsiv açılamadı",
@@ -2684,6 +2713,8 @@ def main():
         root.destroy()
         sys.exit(1)
     root.deiconify()
+    root.update_idletasks()
+    app._simge_tutamaklari = _simgeyi_pencereye_ata(root, _simge_yolu())       # pencere gorununce: dogru boyutta simge
     root.mainloop()
 
 

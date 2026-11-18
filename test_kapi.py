@@ -2352,6 +2352,29 @@ class StatikKapilar(unittest.TestCase):
         self.assertEqual(src.count("open(GUNLUK_KLASORU"), 1, "gunluk dosyasi yalniz _gunluge_yaz'dan acilir")
         self.assertEqual(src.count("_gunluk_dosyasi.write("), 1)
 
+    def test_simge_dosyasi_gorev_cubugu_boyutlarini_icerir(self):
+        """%100/125/150/200 olcekli ekranlarda gorev cubugu 32/40/48/64 px, baslik cubugu 16/20/24/32 px ister: hepsi ico'da olmali."""
+        from PIL import Image
+        ico = Image.open(HERE / "ikon" / "yt-arsiv.ico")
+        boyutlar = {b[0] for b in ico.info["sizes"]}
+        for b in (16, 20, 24, 32, 40, 48, 64, 256):
+            self.assertIn(b, boyutlar, f"ikon\\yt-arsiv.ico'da {b}px yok: gorev cubugunda buyutulup basamakli gorunur")
+        spec = (HERE / "YT-Arsiv.spec").read_text(encoding="utf-8")
+        self.assertEqual(spec.count("icon=IKON"), 4, "iki exe, iki mod: hepsi simgeli")
+        self.assertIn('(IKON, "ikon")', spec, "pencere simgesi exe icine gomulur")
+
+    def test_simge_pencereye_ekran_olcegine_uygun_boyutta_atanir(self):
+        """Tk iconbitmap yalniz 32/16 px verir (pencerenin WM_SETICON'u BOS kalir): olcekli ekranda Windows 32 px'i buyutup 8 bit gibi
+        gosterir.  Simge WM_SETICON ile SM_CXICON/SM_CXSMICON boyutunda (125% -> 40/20) atanmali ve main() bunu cagirmali."""
+        src = (HERE / "YT-Arsiv-GUI.pyw").read_text(encoding="utf-8")
+        g = re.search(r"def _simgeyi_pencereye_ata\(.*?(?=\n\n\nclass App)", src, re.S).group(0)
+        for gerek in ("GetSystemMetrics(11)", "GetSystemMetrics(49)", "LoadImageW(", "0x0080", "0x10"):
+            self.assertIn(gerek, g, gerek)
+        self.assertEqual(src.count("LoadImageW("), 1, "simge yukleme tek kapidan")
+        main = re.search(r"def main\(\):.*", src, re.S).group(0)
+        self.assertIn("_simgeyi_pencereye_ata(root, _simge_yolu())", main)
+        self.assertLess(main.index("root.deiconify()"), main.index("_simgeyi_pencereye_ata("), "pencere gorununce atanmali")
+
     def test_gui_gunluk_satiri_renk_etiketi(self):
         import importlib.util
         import os

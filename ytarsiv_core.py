@@ -6,7 +6,7 @@ from datetime import datetime as _datetime
 from pathlib import Path
 import os as _os_yol
 import sys as _sys_yol
-SURUM = "1.1.0"                    # uygulama surumu: TEK tanim (GUI / CLI / yayin etiketi bununla ayni olmali)
+SURUM = "1.1.1"                    # uygulama surumu: TEK tanim (GUI / CLI / yayin etiketi bununla ayni olmali)
 # Donmus (PyInstaller exe) surumde veri/arac/cekirdek dosyalari exe'nin yaninda durur; kaynaktan calismada bu dosyanin yaninda.
 UYGULAMA_DIZINI = (Path(_sys_yol.executable).resolve().parent if getattr(_sys_yol, "frozen", False)
                    else Path(__file__).resolve().parent)
