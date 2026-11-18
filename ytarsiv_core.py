@@ -13,8 +13,19 @@ ARAC_DIZINI = UYGULAMA_DIZINI / "araclar"
 if ARAC_DIZINI.is_dir():      # ffmpeg.exe / fpcalc.exe buraya konabilir; yt-dlp ffmpeg'i PATH'ten bulur
     _os_yol.environ["PATH"] = str(ARAC_DIZINI) + _os_yol.pathsep + _os_yol.environ.get("PATH", "")
 _cached_path = UYGULAMA_DIZINI / "ytarsiv_core_cached.pyc"
+CEKIRDEK_PYTHON = (3, 14)          # cekirdek bu surumun bayt kodudur (kaynagi yok): baska surumde 'bad magic number' ile cokerdi
+if _sys_yol.version_info[:2] != CEKIRDEK_PYTHON:
+    raise ImportError(
+        "YT-Arsiv cekirdegi Python %d.%d bayt kodudur; bu Python surumuyle (%d.%d) calismaz. "
+        "Python %d.%d kurun ya da hazir exe surumunu kullanin."
+        % (CEKIRDEK_PYTHON + tuple(_sys_yol.version_info[:2]) + CEKIRDEK_PYTHON))
+if not _cached_path.is_file():
+    raise ImportError(f"cekirdek dosyasi bulunamadi: {_cached_path}")
+import importlib.util
 _loader = importlib.machinery.SourcelessFileLoader("_ytarsiv_core_cached", str(_cached_path))
-_cached = _loader.load_module()
+_cached = importlib.util.module_from_spec(importlib.util.spec_from_loader("_ytarsiv_core_cached", _loader))
+_sys_yol.modules["_ytarsiv_core_cached"] = _cached      # load_module() (3.15'te kaldiriliyor) ile ayni kayit
+_loader.exec_module(_cached)
 globals().update({k: v for k, v in _cached.__dict__.items() if k not in {"__name__", "__loader__", "__package__"}})
 # Eski "001 - ID - baslik" adlarini da tanit.
 # Fallback olarak sona ekliyoruz: normal "[videoID]" deseni once denensin, aksi

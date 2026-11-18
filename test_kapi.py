@@ -1828,7 +1828,10 @@ class BagKapisi(unittest.TestCase):
         import io
         import contextlib
         import types
-        raw = importlib.machinery.SourcelessFileLoader("_ham_bag", str(HERE / "ytarsiv_core_cached.pyc")).load_module()
+        import importlib.util
+        yukleyici = importlib.machinery.SourcelessFileLoader("_ham_bag", str(HERE / "ytarsiv_core_cached.pyc"))
+        raw = importlib.util.module_from_spec(importlib.util.spec_from_loader("_ham_bag", yukleyici))
+        yukleyici.exec_module(raw)
         kullanan = []
         for ad, f in vars(raw).items():
             if isinstance(f, types.FunctionType):

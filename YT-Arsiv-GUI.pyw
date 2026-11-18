@@ -157,7 +157,7 @@ class App:
         tara.add_command(label="Çalışan işi iptal et", accelerator="Esc", command=self.on_cancel)
         m.add_cascade(label="Tara", menu=tara)
 
-        m.add_cascade(label="Bakım", menu=self._bakim_menusu(m))
+        m.add_cascade(label="Bakım ve Temizlik", menu=self._bakim_menusu(m))
 
         gorunum = tk.Menu(m, tearoff=0)
         gorunum.add_command(label="Yenile", accelerator="F5", command=self._refresh_all)
@@ -186,7 +186,7 @@ class App:
 
     def _bakim_menusu(self, ust):
         """BAKIM = arsivi duzenli tutan isler (tarama/indirme DEGIL): onay bekleyenler, klasor onarimi, kopya temizligi, kontrol.
-        Ayni menu hem menu cubugunda hem arac cubugundaki 'Bakım' dugmesinde kullanilir (iki ayri Menu nesnesi, tek tanim)."""
+        Ayni menu hem menu cubugunda hem arac cubugundaki 'Bakım ve Temizlik' dugmesinde kullanilir (iki ayri Menu nesnesi, tek tanim)."""
         b = tk.Menu(ust, tearoff=0)
         b.add_command(label="Silinme onayları...", command=self.on_silinme_onaylari)
         b.add_separator()
@@ -232,7 +232,7 @@ class App:
         ttk.Button(toolbar, text="Tümünü Tara", style="Ana.TButton", command=self.on_sync_all).pack(side="left", padx=2)
         ttk.Button(toolbar, text="Seçiliyi Tara", command=self.on_sync_selected).pack(side="left", padx=2)
         ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=self._px(8))
-        bakim = ttk.Menubutton(toolbar, text="Bakım", direction="below")
+        bakim = ttk.Menubutton(toolbar, text="Bakım ve Temizlik", direction="below")
         bakim["menu"] = self._bakim_menusu(bakim)
         bakim.pack(side="left", padx=2)
         # Yalniz onay bekleyen silinme VARSA gorunur (bkz. _onay_dugmesini_guncelle)

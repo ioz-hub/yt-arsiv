@@ -48,11 +48,11 @@ Baslat.bat
 
 Arayüz işleve göre düzenlidir:
 
-- **Araç çubuğu:** `+ Playlist / Kanal Ekle` · `Tümünü Tara` / `Seçiliyi Tara` · `Bakım` · `Ayarlar` · video arama.
+- **Araç çubuğu:** `+ Playlist / Kanal Ekle` · `Tümünü Tara` / `Seçiliyi Tara` · `Bakım ve Temizlik` · `Ayarlar` · video arama.
   Onay bekleyen toplu silinme varsa ayrıca `Onay bekleyen: N` düğmesi görünür.
 - **Sekmeler:** `Playlistler`, `Arama` (arşiv) · `Liste Dışı`, `Yayından Kalkan`, `Aynı Videolar` (temizlik; başlıkta
   kayıt sayısı görünür) · `Geçmiş`. Sütun başlığına tıklayınca tablo o sütuna göre sıralanır.
-- **Bakım menüsü:** silinme onayları, klasör onarımı (kayıp dosyaları yeniden bağlama), elle eklenen klasörlerin
+- **Bakım ve Temizlik menüsü:** silinme onayları, klasör onarımı (kayıp dosyaları yeniden bağlama), elle eklenen klasörlerin
   taranması, kopya temizliği / ses analizi, yayından kalkanların YouTube'da yeniden kontrolü.
 - **Ayarlar:** `Depolama` (depolar, boş yer sınırı), `İndirme` (indirmeler arası bekleme, uzun videolarda kalite
   sınırı), `Bilgi` (klasörler, yt-dlp / ffmpeg durumu, çerez dosyası).
