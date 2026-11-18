@@ -1606,35 +1606,38 @@ def fazla_arsiv_adlarini_temizle(conn, log=print):
         if st:
             kullanilan_yol.add(os.path.normcase(str(p)))
             kullanilan_inode.setdefault((st.st_dev, st.st_ino), p)
-    kok = _cached.DOWNLOADS
-    if not kok.exists():
-        return 0
     silinen = 0
-    for ust in [p for p in kok.iterdir() if p.is_dir() and p.name not in _ARSIV_ADLARI]:
-        for ad in _ARSIV_ADLARI:
-            alt = ust / ad
-            if not alt.is_dir():
+    # TARANAN arsiv klasorleri (her depo icin: birincil + ek): (1) UST DUZEY <depo>/_ListeDisi, _YayındanKalkan - cekirdegin yeni
+    # tasimalari ve kopya sabitleme buraya yapar; DB sifirlanir ya da satir 'active'e donerse adlari kimsesiz kalir ve ONCEDEN HIC
+    # temizlenmiyordu (downloads/_ListeDisi yuzlerce eski ad yigini oldu);  (2) eski bicim <playlist>/_ListeDisi alt klasorleri.
+    altlar = []
+    for kok in [Path(k) for k in tum_depolar() if Path(k).exists()]:
+        altlar += [kok / ad for ad in _ARSIV_ADLARI]
+        altlar += [ust / ad for ust in kok.iterdir() if ust.is_dir() and ust.name not in _ARSIV_ADLARI for ad in _ARSIV_ADLARI]
+    for alt in altlar:
+        if not alt.is_dir():
+            continue
+        ad = alt.name
+        for f in sorted(alt.iterdir()):
+            if not f.is_file() or f.suffix.lower() not in VIDEO_EXTENSIONS or _PARCA_RE.search(f.stem):
                 continue
-            for f in sorted(alt.iterdir()):
-                if not f.is_file() or f.suffix.lower() not in VIDEO_EXTENSIONS or _PARCA_RE.search(f.stem):
+            if os.path.normcase(str(f)) in kullanilan_yol:
+                continue                          # bir kaydin gercek dosyasi: dokunma
+            st = os.stat(f)
+            asil = kullanilan_inode.get((st.st_dev, st.st_ino))
+            if asil is None or st.st_nlink < 2 or asil == f:
+                continue                          # baska adi yok / kullanilmiyor: fazladan ad degil
+            for yan in sorted(alt.iterdir()):
+                if yan == f or not yan.is_file() or yan.suffix.lower() in VIDEO_EXTENSIONS \
+                        or not yan.name.startswith(f.stem + "."):
                     continue
-                if os.path.normcase(str(f)) in kullanilan_yol:
-                    continue                          # bir kaydin gercek dosyasi: dokunma
-                st = os.stat(f)
-                asil = kullanilan_inode.get((st.st_dev, st.st_ino))
-                if asil is None or st.st_nlink < 2 or asil == f:
-                    continue                          # baska adi yok / kullanilmiyor: fazladan ad degil
-                for yan in sorted(alt.iterdir()):
-                    if yan == f or not yan.is_file() or yan.suffix.lower() in VIDEO_EXTENSIONS \
-                            or not yan.name.startswith(f.stem + "."):
-                        continue
-                    es = asil.parent / (asil.stem + yan.name[len(f.stem):])
-                    if es.is_file() and es.stat().st_size == yan.stat().st_size and _ozet_sha256(es) == _ozet_sha256(yan):
-                        yan.unlink()
-                        silinen += 1
-                f.unlink()                            # asil dosya baska adla duruyor: yalniz bu AD gider
-                silinen += 1
-                log(f"  [-] fazladan ad silindi (dosya baska adla duruyor): {ad}/{f.name[:60]}")
+                es = asil.parent / (asil.stem + yan.name[len(f.stem):])
+                if es.is_file() and es.stat().st_size == yan.stat().st_size and _ozet_sha256(es) == _ozet_sha256(yan):
+                    yan.unlink()
+                    silinen += 1
+            f.unlink()                            # asil dosya baska adla duruyor: yalniz bu AD gider
+            silinen += 1
+            log(f"  [-] fazladan ad silindi (dosya baska adla duruyor): {ad}/{f.name[:60]}")
     _bos_arsiv_alt_klasorlerini_sil()
     return silinen
 

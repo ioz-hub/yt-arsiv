@@ -576,6 +576,28 @@ class Kapilar(unittest.TestCase):
         self.assertTrue((self.core.DOWNLOADS / aktif).exists(), "gercek dosya durmali")
         self.assertTrue((self.core.DOWNLOADS / tek).exists(), "tek adli dosya silinmez")
 
+    def test_ust_duzey_arsivdeki_kimsesiz_fazla_adlar_silinir_sahipli_ve_tek_ad_durur(self):
+        """downloads/_ListeDisi (UST duzey) onceden hic temizlenmiyordu: bir kaydin dosyasiyla AYNI fiziksel dosya olan kimsesiz adlar gider."""
+        import os
+        aktif = self.dosya("Euro3", "004 - A [AAAAAAAAAA1].mp4")
+        self.satir("AAAAAAAAAA1", "Euro3", file_path=aktif)
+        ust = self.core.DOWNLOADS / "_ListeDisi"
+        ust.mkdir(parents=True)
+        os.link(self.core.DOWNLOADS / aktif, ust / "004 - A [AAAAAAAAAA1].mp4")             # kimsesiz ad (1)
+        os.link(self.core.DOWNLOADS / aktif, ust / "177 - A [AAAAAAAAAA1].mp4")             # ayni videonun ikinci eski numarali adi (2)
+        tek = self.dosya("_ListeDisi", "009 - T [TTTTTTTTTT1].mp4")                          # TEK ad (baska adi yok): kalmali
+        klix = self.dosya("Klix", "005 - B [BBBBBBBBBB1].mp4")
+        self.satir("BBBBBBBBBB1", "Klix", file_path=klix)
+        os.link(self.core.DOWNLOADS / klix, ust / "005 - B [BBBBBBBBBB1].mp4")
+        self.satir("BBBBBBBBBB1", "Euro3", status="removed_from_playlist", file_path="_ListeDisi\\005 - B [BBBBBBBBBB1].mp4")  # SAHIPLI ad
+        self.assertEqual(self.core.fazla_arsiv_adlarini_temizle(self.conn, log=lambda m: None), 2)
+        self.assertFalse((ust / "004 - A [AAAAAAAAAA1].mp4").exists())
+        self.assertFalse((ust / "177 - A [AAAAAAAAAA1].mp4").exists())
+        self.assertTrue((self.core.DOWNLOADS / aktif).exists(), "gercek dosya durmali")
+        self.assertTrue((self.core.DOWNLOADS / tek).exists(), "tek adli dosya silinmez")
+        self.assertTrue((ust / "005 - B [BBBBBBBBBB1].mp4").exists(), "bir kaydin arsiv adi silinmez")
+        self.assertEqual(self.core.fazla_arsiv_adlarini_temizle(self.conn, log=lambda m: None), 0)     # tekrar: no-op
+
     def test_dosyasiz_user_deleted_kayit_ayni_videolarda_listelenmez(self):
         fp = self.dosya("Klix", "001 - Sarki [VVVVVVVVVV2].mp4")
         self.satir("VVVVVVVVVV2", "Klix", file_path=fp)
